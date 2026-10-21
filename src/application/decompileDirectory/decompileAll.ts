@@ -24,6 +24,7 @@ import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { projectAnalysisError } from "../../domain/analysisErrorProjection.js";
 import { procedureInfoSchema } from "../../domain/native/procedureInfo.js";
 import { addressedValueSchema } from "../../domain/native/nativeInventory.js";
+import { addressCoordinate } from "../../domain/native/addressCoordinate.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
 import { err, ok, type Result } from "../../domain/result.js";
 import {
@@ -356,6 +357,7 @@ const publishOne = async (input: {
   const body = await readBody(
     input.analysis,
     input.procedure.address,
+    input.identity,
     input.signal,
     input.bodySupport,
   );
@@ -465,6 +467,7 @@ const publishOne = async (input: {
 const readBody = async (
   analysis: AnalysisOperationPort,
   address: string,
+  identity: ExportIdentity,
   signal: AbortSignal | undefined,
   support: "unknown" | "unavailable",
 ): Promise<
@@ -506,11 +509,26 @@ const readBody = async (
       support,
     };
   }
+  const mismatch = observationMismatch(identity, observed.value);
+  if (mismatch !== undefined)
+    return {
+      kind: "body",
+      fact: unavailableBody(`procedure_info: ${mismatch.message}`),
+      support,
+    };
   const parsed = procedureInfoSchema.safeParse(observed.value.result);
   if (!parsed.success)
     return {
       kind: "body",
       fact: unavailableBody("procedure_info returned an invalid body."),
+      support,
+    };
+  if (!sameAddress(parsed.data.entrypoint, address))
+    return {
+      kind: "body",
+      fact: unavailableBody(
+        "procedure_info described a different entry point than this function.",
+      ),
       support,
     };
   if (!parsed.data.body.available)
@@ -588,6 +606,15 @@ const observationMismatch = (
   return target === undefined || target === identity.targetSha256
     ? undefined
     : TARGET_CHANGED;
+};
+
+/** Same canonical address; numeric when both parse, otherwise exact text. */
+const sameAddress = (left: string, right: string): boolean => {
+  const a = addressCoordinate(left);
+  const b = addressCoordinate(right);
+  return a === null || b === null
+    ? left === right
+    : a.space === b.space && a.offset === b.offset;
 };
 
 const failureReason = (error: AnalysisError): FailureReason => {

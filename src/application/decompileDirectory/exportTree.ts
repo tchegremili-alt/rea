@@ -1,11 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
 import {
   chmod,
   lstat,
   mkdir,
   open,
   link,
-  readdir,
   readFile,
   realpath,
   rename,
@@ -144,7 +144,7 @@ export class DecompileExport {
         ),
       );
     const written = await this.journal
-      .write(`${JSON.stringify(line.data)}\n`)
+      .writeFile(`${JSON.stringify(line.data)}\n`)
       .then(() => this.journal.sync())
       .then(
         () => true,
@@ -248,7 +248,6 @@ export class DecompileExport {
     if (!opened.ok) return opened;
     const functions = await prepareFunctionsDirectory(root);
     if (!functions.ok) return functions;
-    await removeStaleTemporaries(root);
     const handle = await openJournal(root, "a");
     if (!handle.ok) return handle;
     // Drop a torn final line left by a crash so the next append starts a line.
@@ -305,7 +304,7 @@ export const commitFunctionFile = async (
   );
   if (!isFileHandle(handle)) return { status: "io" };
   const stored = await handle
-    .write(bytes)
+    .writeFile(bytes)
     .then(() => handle.sync())
     .then(
       () => true,
@@ -449,7 +448,7 @@ const seedJournal = async (
   const opened = await openJournal(root, "wx");
   if (!opened.ok) return opened;
   const seeded = await opened.value
-    .write(`${JSON.stringify(header.data)}\n`)
+    .writeFile(`${JSON.stringify(header.data)}\n`)
     .then(() => opened.value.sync())
     .then(() => chmod(join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME), 0o600))
     .then(
@@ -466,13 +465,22 @@ const seedJournal = async (
   );
 };
 
+/** Absent on Windows, where the journal's lstat check is the only guard. */
+const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
+
+const JOURNAL_FLAGS = {
+  wx: constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW,
+  a: constants.O_WRONLY | constants.O_APPEND | NO_FOLLOW,
+} as const;
+
+/** The journal is never opened through a symlink: repair truncates it. */
 const openJournal = async (
   root: string,
   flag: "wx" | "a",
 ): Promise<Result<FileHandle, AnalysisError>> => {
   const handle = await open(
     join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME),
-    flag,
+    JOURNAL_FLAGS[flag],
     0o600,
   ).catch((cause: unknown) => cause);
   return isFileHandle(handle)
@@ -494,10 +502,20 @@ interface OpenedJournal {
   readonly journalBytes: number;
 }
 
-const readJournalBytes = (root: string): Promise<unknown> =>
-  readFile(join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME)).catch(
+/** Read the journal only when it is a regular file, not a symlink. */
+const readJournalBytes = async (root: string): Promise<unknown> => {
+  const path = join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME);
+  const stat = await lstat(path).catch((cause: unknown) => cause);
+  if (!isStat(stat)) return stat;
+  if (!stat.isFile()) return new Error("journal is not a regular file");
+  const handle = await open(path, constants.O_RDONLY | NO_FOLLOW).catch(
     (cause: unknown) => cause,
   );
+  if (!isFileHandle(handle)) return handle;
+  const bytes = await handle.readFile().catch((cause: unknown) => cause);
+  await handle.close().catch(() => undefined);
+  return bytes;
+};
 
 const readJournal = async (
   root: string,
@@ -714,17 +732,6 @@ const removeCreatedRoot = async <T>(
       );
 };
 
-const STALE_TEMPORARY =
-  /^(?:\.tmp-[0-9a-f]{16}\.c|\.decompile-index\.[0-9a-f]{16}\.tmp)$/u;
-
-/** Remove this export's own temporary files left by an interrupted run. */
-const removeStaleTemporaries = async (root: string): Promise<void> => {
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries)
-    if (entry.isFile() && STALE_TEMPORARY.test(entry.name))
-      await unlink(join(root, entry.name)).catch(() => undefined);
-};
-
 const writeOwnedIndex = async (
   root: string,
   text: string,
@@ -744,7 +751,7 @@ const writeOwnedIndex = async (
       ),
     );
   const stored = await handle
-    .write(text)
+    .writeFile(text)
     .then(() => handle.sync())
     .then(
       () => true,
@@ -799,11 +806,13 @@ const isStat = (
   value: unknown,
 ): value is {
   isDirectory: () => boolean;
+  isFile: () => boolean;
   isSymbolicLink: () => boolean;
 } =>
   typeof value === "object" &&
   value !== null &&
   "isDirectory" in value &&
+  "isFile" in value &&
   "isSymbolicLink" in value &&
   typeof value.isDirectory === "function" &&
   typeof value.isSymbolicLink === "function";

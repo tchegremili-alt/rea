@@ -1,4 +1,4 @@
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 
@@ -679,9 +679,11 @@ describe("decompile_all partial results", () => {
     const { calls, tools } = harness();
     const result = await run(tools, directory(), {
       address_start: "ram:0x20",
-      address_end: "0x10",
+      address_end: "ram:0x10",
     });
     expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.userMessage).toContain("before address start");
     expect(calls).toHaveLength(0);
     await expect(readFile(directory())).rejects.toThrow();
   });
@@ -779,7 +781,8 @@ describe("decompile_all identity and recovery", () => {
       journalPath,
       `${await readFile(journalPath, "utf8")}{"kind":"function","name":"é\u00e9`,
     );
-    await writeFile(join(directory(), ".tmp-0123456789abcdef.c"), "partial");
+    const stray = join(directory(), ".tmp-0123456789abcdef.c");
+    await writeFile(stray, "not owned by this run");
     const resumed = await run(harness().tools, directory(), { resume: true });
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
@@ -792,9 +795,77 @@ describe("decompile_all identity and recovery", () => {
       expect(
         decompileJournalLineSchema.safeParse(JSON.parse(line)).success,
       ).toBe(true);
-    await expect(
-      readFile(join(directory(), ".tmp-0123456789abcdef.c")),
-    ).rejects.toThrow();
+    // A file is not this export's just because its name looks like a temporary.
+    await expect(readFile(stray, "utf8")).resolves.toBe(
+      "not owned by this run",
+    );
+  });
+});
+
+describe("decompile_all untrusted directory and provider facts", () => {
+  const directory = useOutputDirectory();
+
+  it("refuses a journal that is a symlink and leaves its target unchanged", async () => {
+    expect((await run(harness().tools, directory(), { limit: 1 })).ok).toBe(
+      true,
+    );
+    const journalPath = join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME);
+    const outside = join(directory(), "..", "outside.jsonl");
+    const torn = `${await readFile(journalPath, "utf8")}{"kind":"func`;
+    await writeFile(outside, torn);
+    await rm(journalPath);
+    await symlink(outside, journalPath);
+    const next = harness();
+    const resumed = await run(next.tools, directory(), { resume: true });
+    expect(resumed.ok).toBe(false);
+    expect(of(next.calls, "procedure_pseudo_code")).toHaveLength(0);
+    expect(await readFile(outside, "utf8")).toBe(torn);
+  });
+
+  it("does not take body ranges from procedure_info for another entry point", async () => {
+    const port: AnalysisOperationPort = {
+      execute: (operation) => {
+        if (operation === "list_procedures")
+          return Promise.resolve(
+            ok(
+              createAnalysisExecution(
+                [{ address: "0x1000", value: "main" }],
+                provider,
+                { analysisProfile: profile, subject },
+              ),
+            ),
+          );
+        if (operation === "procedure_info")
+          return Promise.resolve(
+            ok(
+              createAnalysisExecution(infoFor("0x9000"), provider, {
+                analysisProfile: profile,
+              }),
+            ),
+          );
+        return Promise.resolve(
+          ok(
+            createAnalysisExecution(
+              `int main(void) { ${sentinel} }`,
+              provider,
+              {
+                analysisProfile: profile,
+              },
+            ),
+          ),
+        );
+      },
+    };
+    const result = await new EnhancedTools(port).execute("decompile_all", {
+      output_directory: directory(),
+    });
+    expect(result.ok).toBe(true);
+    const text = await readFile(
+      join(directory(), "functions/0x1000.c"),
+      "utf8",
+    );
+    expect(text).toContain("// body: unavailable");
+    expect(text).not.toContain("0x9000");
   });
 
   it("keeps a function's file name after a failed retry that recorded no path", async () => {
