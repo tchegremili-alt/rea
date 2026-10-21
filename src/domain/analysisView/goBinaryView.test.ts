@@ -111,7 +111,11 @@ it.each([
   (architecture, subjectArchitecture, accepted) => {
     const input = parent();
     if (input.subject == null) throw new Error("Expected artifact subject");
-    const subject = { ...input.subject, architecture: subjectArchitecture };
+    // The subject union now includes a DOL member pinned to powerpc; this table only varies the Go subject.
+    const subject = {
+      ...input.subject,
+      architecture: subjectArchitecture,
+    } as typeof input.subject;
     const normalizedResult = { ...report, architecture };
     for (const view of [
       { kind: "summary" },

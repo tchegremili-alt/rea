@@ -75,6 +75,17 @@ export const resolveGhidraAnalysisProfile = async (
     );
   if (target.kind !== "executable")
     return Promise.resolve(ok({ profile: null }));
+  // TODO(4b): replace this refusal with the BinaryLoader + ReaGhidraPrepareDol import.
+  if (target.format === "gamecube-dol")
+    return Promise.resolve(
+      err(
+        new AnalysisUnsupportedTargetError(
+          "resolve_analysis_profile",
+          target.path,
+          "GameCube DOL Ghidra import is not yet implemented",
+        ),
+      ),
+    );
   if (installation.status === "unavailable")
     return Promise.resolve(
       err(new ProviderAdapterError(identity.id, "resolve_analysis_profile")),

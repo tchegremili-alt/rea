@@ -496,7 +496,7 @@ const lifecycleTargetFields = {
 };
 const detectedLifecycleTargetSchema = z.object({
   ...lifecycleTargetFields,
-  format: targetFormatSchema.exclude(["raw-binary"]),
+  format: targetFormatSchema.exclude(["raw-binary", "gamecube-dol"]),
   architecture: z
     .enum(BINARY_ARCHITECTURES)
     .exclude([...RAW_ONLY_ARCHITECTURES])
@@ -511,6 +511,15 @@ const rawLifecycleTargetSchema = z.object({
     "Canonical caller-selected address where raw file offset 0 is mapped and execution is seeded.",
   ),
 });
+const dolLifecycleTargetSchema = z.object({
+  ...lifecycleTargetFields,
+  format: z.literal("gamecube-dol"),
+  kind: z.literal("executable"),
+  architecture: z.literal("powerpc"),
+  entry_point: rawBinaryEntryPointSchema.describe(
+    "Canonical entry address taken from the caller-selected DOL header.",
+  ),
+});
 
 /** Exact structured-content schemas for target lifecycle operations. */
 export const sessionOutputSchemas = {
@@ -518,6 +527,7 @@ export const sessionOutputSchemas = {
     z.discriminatedUnion("format", [
       detectedLifecycleTargetSchema,
       rawLifecycleTargetSchema,
+      dolLifecycleTargetSchema,
     ]),
   ),
   open_bundle_resources: lifecycleResultOf(bundleResourceRootSchema),
