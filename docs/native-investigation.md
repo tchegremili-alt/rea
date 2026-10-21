@@ -166,6 +166,22 @@ remains valid. This tool
 has no dedicated CLI command; the existing `decompile` command remains the
 single-procedure CLI operation.
 
+`decompile_all` (`rea decompile-all <target> --output <directory>`) writes one
+pseudocode file per analyzed function and returns only a manifest: counts, the
+output directory, capped failure reasons, provider identity, and the
+analysis-profile digest. The manifest and `decompile-index.json` do not contain
+pseudocode. Each file records the provider name, canonical address, inclusive
+body ranges when `procedure_info` supplies them, and that observation's
+limitations. A fresh output directory must not already exist. `--resume`
+continues an export for the same target SHA-256, provider, analysis profile,
+and layout, skips files whose bytes still match the journal, and never
+overwrites a conflicting file. One function's decompiler error, deadline, or
+unresolved identity is counted and does not stop the others. `--layout dwarf`
+reports that compilation-unit paths are unavailable and still names files by
+address. Filters are a case-sensitive name substring, a case-sensitive name
+prefix, an inclusive address range, and a count limit. Cancellation leaves
+files already written in place.
+
 Type inspection selects one exact database pathname or typed data address.
 Struct/union fields, enums, pointers, arrays, typedefs, size, alignment, packing
 and bitfields retain database authority. Child types use exact IDs for further

@@ -67,6 +67,7 @@ export const registerEnhancedTools = (
   const objcClasses = toolContract("get_objc_classes");
   const objcProtocols = toolContract("get_objc_protocols");
   const batchDecompile = toolContract("batch_decompile");
+  const decompileAll = toolContract("decompile_all");
   const callGraph = toolContract("get_call_graph");
   const swiftTypes = toolContract("analyze_swift_types");
   const xrefsToName = toolContract("find_xrefs_to_name");
@@ -119,6 +120,15 @@ export const registerEnhancedTools = (
     (input, context) =>
       executeEnhancedTool(registration, batchDecompile, {
         validatedCall: { name: "batch_decompile", input },
+        context,
+      }),
+  );
+  server.registerTool(
+    decompileAll.name,
+    toolRegistrationOptions(decompileAll),
+    (input, context) =>
+      executeEnhancedTool(registration, decompileAll, {
+        validatedCall: { name: "decompile_all", input },
         context,
       }),
   );
@@ -272,6 +282,7 @@ const executeEnhancedTool = async (
           return registration.delivery.toCallToolResult(recorded, contract);
         if (
           name !== "trace_native_ui_action" &&
+          name !== "decompile_all" &&
           registration.allowsSnapshotReplay?.(name) === true
         ) {
           const workflowRecord = workflowSnapshotRecord(

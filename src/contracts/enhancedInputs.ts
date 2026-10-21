@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { MAXIMUM_DISPATCH_METADATA_INPUT_BYTES } from "../domain/native/objcSwiftMetadata.js";
+import { decompileDirectoryInputSchema } from "./decompileDirectory.js";
 import { nativeValueTraceInputSchema } from "../domain/native/nativeValueTrace.js";
 const traceLiteralInputSchema = z.strictObject({
   query: z.string().min(1),
@@ -50,6 +51,7 @@ export const enhancedInputSchemas = {
       .array(z.string().describe("A provider-normalized procedure address"))
       .default([]),
   }),
+  decompile_all: decompileDirectoryInputSchema,
   get_call_graph: z.strictObject({
     address: z
       .string()
