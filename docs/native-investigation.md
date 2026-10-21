@@ -174,8 +174,8 @@ pseudocode. Each file records the provider name, canonical address, inclusive
 body ranges when `procedure_info` supplies them, and that observation's
 limitations. A fresh output directory must not already exist. `--resume`
 continues an export for the same target SHA-256, provider, analysis profile,
-and layout; an export without a known target or profile digest cannot be
-resumed. Resume skips files whose bytes still match the journal, tries
+and layout; it requires the directory to exist, and an export without a known
+target or profile digest cannot be resumed. Resume skips files whose bytes still match the journal, tries
 functions it has not attempted before retrying recorded failures, ignores a
 journal line torn by an interrupted write, and never overwrites a conflicting
 file. One function's decompiler error or deadline is counted and does not stop

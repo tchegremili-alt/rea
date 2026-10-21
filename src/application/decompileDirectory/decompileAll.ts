@@ -114,27 +114,35 @@ export const decompileAll = async (
     failures: [],
     bodyUnavailable: false,
   };
-  const published = await publishSelected({
-    analysis,
-    session,
-    procedures: attemptOrder(session, selection.procedures),
-    identity: loaded.value.identity,
-    signal,
-    limit: input.limit,
-    state,
-  });
-  const limitations = exportLimitations(
-    input.layout,
-    loaded.value.identity,
-    selection.collapsedDuplicates,
-    state.bodyUnavailable,
-    loaded.value.unaddressed,
-  );
-  const indexed = await session.writeIndex({
-    layoutStatus: layoutStatus(input.layout),
-    limitations,
-  });
-  const closed = await session.close();
+  let published: Result<void, AnalysisError> | undefined;
+  let indexed: Result<void, AnalysisError> | undefined;
+  let limitations: readonly string[] = [];
+  let closed: Result<void, AnalysisError> | undefined;
+  // The journal handle is closed on every path, including an unexpected throw.
+  try {
+    published = await publishSelected({
+      analysis,
+      session,
+      procedures: attemptOrder(session, selection.procedures),
+      identity: loaded.value.identity,
+      signal,
+      limit: input.limit,
+      state,
+    });
+    limitations = exportLimitations(
+      input.layout,
+      loaded.value.identity,
+      selection.collapsedDuplicates,
+      state.bodyUnavailable,
+      loaded.value.unaddressed,
+    );
+    indexed = await session.writeIndex({
+      layoutStatus: layoutStatus(input.layout),
+      limitations,
+    });
+  } finally {
+    closed = await session.close();
+  }
   if (!published.ok) return published;
   if (!indexed.ok) return indexed;
   if (!closed.ok) return closed;
@@ -372,12 +380,9 @@ const publishOne = async (input: {
       bodySupport: body.support,
     };
   }
-  if (!observationMatches(input.identity, decompiled.value)) {
-    const reason = {
-      code: "profile_changed",
-      message:
-        "The decompiler observation does not match this export's provider or analysis profile.",
-    };
+  const mismatch = observationMismatch(input.identity, decompiled.value);
+  if (mismatch !== undefined) {
+    const reason = mismatch;
     recordFailure(input.state, input.procedure, reason);
     return {
       result: await input.session.append(
@@ -546,27 +551,42 @@ const existingFile = async (
   return nodeAbsent(bytes) ? "write" : "io";
 };
 
-const observationMatches = (
+const PROFILE_CHANGED: FailureReason = {
+  code: "profile_changed",
+  message:
+    "The decompiler observation does not match this export's provider or analysis profile.",
+};
+
+const TARGET_CHANGED: FailureReason = {
+  code: "target_changed",
+  message:
+    "The decompiler observation names a different target than this export.",
+};
+
+/** Why a per-function observation cannot join this export, if it cannot. */
+const observationMismatch = (
   identity: ExportIdentity,
   execution: AnalysisExecution,
-): boolean => {
+): FailureReason | undefined => {
   const provider = execution.provider;
   if (
     provider.id !== identity.provider.id ||
     provider.name !== identity.provider.name ||
     provider.version !== identity.provider.version
   )
-    return false;
+    return PROFILE_CHANGED;
   // A missing profile is unknown, not a match for a committed one.
   if (
     (execution.analysisProfile?.digest ?? null) !==
     identity.analysisProfileDigest
   )
-    return false;
+    return PROFILE_CHANGED;
   // A per-function observation may omit its subject; one that names a
   // different target is not this export's target.
   const target = execution.subject?.sha256;
-  return target === undefined || target === identity.targetSha256;
+  return target === undefined || target === identity.targetSha256
+    ? undefined
+    : TARGET_CHANGED;
 };
 
 const failureReason = (error: AnalysisError): FailureReason => {

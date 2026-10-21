@@ -66,7 +66,16 @@ export const classifyOutputPath = async (
     (stat) => stat,
     (cause: unknown) => cause,
   );
-  if (!isDirectoryStat(listed)) return missingOrRejected(stripped, listed);
+  if (!isDirectoryStat(listed)) {
+    if (resume && nodeCode(listed) === "ENOENT")
+      return err(
+        decompileInputError(
+          "output_directory",
+          "Resume requires an existing export directory. Omit resume to start a new export.",
+        ),
+      );
+    return missingOrRejected(stripped, listed);
+  }
   if (!resume)
     return err(
       decompileInputError(
@@ -157,9 +166,9 @@ export class DecompileExport {
   }): Promise<Result<void, AnalysisError>> {
     // The journal owns the outcomes. Rebuild from disk so a concurrent run's
     // appended records are not dropped by this run's in-memory view.
-    const journal = await readJournalText(this.root);
+    const journal = await readJournalBytes(this.root);
     const parsed =
-      typeof journal === "string" ? parseJournal(journal) : undefined;
+      journal instanceof Buffer ? parseJournal(journal) : undefined;
     if (parsed === undefined || !parsed.ok)
       return err(
         new AnalysisOutputError(
@@ -213,18 +222,10 @@ export class DecompileExport {
   ): Promise<Result<DecompileExport, AnalysisError>> {
     const created = await createPrivateDirectory(root);
     if (!created.ok) return created;
-    // This call created root, so it owns the cleanup. A failed removal leaves
-    // the directory for the caller; the original error is still returned.
     const functions = await prepareFunctionsDirectory(root);
-    if (!functions.ok) {
-      await rm(root, { recursive: true, force: true }).catch(() => undefined);
-      return functions;
-    }
+    if (!functions.ok) return removeCreatedRoot(root, functions);
     const opened = await seedJournal(root, identity);
-    if (!opened.ok) {
-      await rm(root, { recursive: true, force: true }).catch(() => undefined);
-      return opened;
-    }
+    if (!opened.ok) return removeCreatedRoot(root, opened);
     return ok(
       new DecompileExport(root, opened.value, new Map(), new Set(), identity),
     );
@@ -242,12 +243,13 @@ export class DecompileExport {
     const handle = await openJournal(root, "a");
     if (!handle.ok) return handle;
     // Drop a torn final line left by a crash so the next append starts a line.
-    const repaired = await handle.value
-      .truncate(opened.value.committedBytes)
-      .then(
+    // An intact journal is not truncated, so a concurrent append is kept.
+    const repaired =
+      opened.value.committedBytes === opened.value.journalBytes ||
+      (await handle.value.truncate(opened.value.committedBytes).then(
         () => true,
         () => false,
-      );
+      ));
     if (!repaired) {
       await handle.value.close().catch(() => undefined);
       return err(
@@ -477,12 +479,14 @@ const openJournal = async (
 interface OpenedJournal {
   readonly records: Map<string, DecompileDirectoryFunctionRecord>;
   readonly usedPaths: Set<string>;
-  /** UTF-8 length of the newline-terminated lines. */
+  /** Byte length of the newline-terminated lines. */
   readonly committedBytes: number;
+  /** Byte length of the journal file as read. */
+  readonly journalBytes: number;
 }
 
-const readJournalText = (root: string): Promise<unknown> =>
-  readFile(join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME), "utf8").catch(
+const readJournalBytes = (root: string): Promise<unknown> =>
+  readFile(join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME)).catch(
     (cause: unknown) => cause,
   );
 
@@ -490,10 +494,10 @@ const readJournal = async (
   root: string,
   identity: ExportIdentity,
 ): Promise<Result<OpenedJournal, AnalysisError>> => {
-  const text = await readJournalText(root);
-  if (typeof text !== "string")
+  const bytes = await readJournalBytes(root);
+  if (!(bytes instanceof Buffer))
     return err(
-      nodeCode(text) === "ENOENT"
+      nodeCode(bytes) === "ENOENT"
         ? decompileInputError(
             "output_directory",
             "Resume requires decompile-journal.jsonl in the output directory.",
@@ -503,7 +507,7 @@ const readJournal = async (
             "The decompile journal could not be read.",
           ),
     );
-  const parsed = parseJournal(text);
+  const parsed = parseJournal(bytes);
   if (!parsed.ok) return parsed;
   const unknown = unknownIdentity(parsed.value.header, identity);
   if (unknown !== undefined) return err(unknown);
@@ -512,6 +516,7 @@ const readJournal = async (
         records: parsed.value.records,
         usedPaths: parsed.value.usedPaths,
         committedBytes: parsed.value.committedBytes,
+        journalBytes: parsed.value.journalBytes,
       })
     : err(
         decompileInputError(
@@ -522,16 +527,16 @@ const readJournal = async (
 };
 
 const parseJournal = (
-  text: string,
+  bytes: Buffer,
 ): Result<
   OpenedJournal & { readonly header: DecompileJournalHeader },
   AnalysisError
 > => {
-  // Every committed line ends with a newline. Text after the last newline is
-  // an interrupted append and is not part of the journal.
-  const committedEnd = text.lastIndexOf("\n") + 1;
-  const committed = text.slice(0, committedEnd);
-  const lines = committed.split("\n");
+  // Every committed line ends with a newline. Bytes after the last newline are
+  // an interrupted append and are not part of the journal. Offsets are bytes,
+  // so damaged UTF-8 cannot move the truncation point.
+  const committedBytes = bytes.lastIndexOf(0x0a) + 1;
+  const lines = bytes.subarray(0, committedBytes).toString("utf8").split("\n");
   lines.pop();
   const header = decompileJournalHeaderSchema.safeParse(parseJson(lines[0]));
   if (!header.success) return err(incompatibleJournal());
@@ -560,7 +565,8 @@ const parseJournal = (
     header: header.data,
     records,
     usedPaths: new Set(pathOwners.keys()),
-    committedBytes: Buffer.byteLength(committed, "utf8"),
+    committedBytes,
+    journalBytes: bytes.length,
   });
 };
 
@@ -649,7 +655,8 @@ const allocateFunctionPath = (
   const suffix = createHash("sha256").update(address).digest("hex").slice(0, 8);
   let candidate = `${directory}/${base}-${suffix}.c`;
   let discriminator = 0;
-  while (used.has(candidate) && discriminator < 1_000) {
+  // Terminates: `used` is finite.
+  while (used.has(candidate)) {
     discriminator += 1;
     candidate = `${directory}/${base}-${suffix}-${discriminator.toString(16)}.c`;
   }
@@ -662,6 +669,25 @@ const sanitizeAddress = (address: string): string => {
     .replace(/^\.+/u, "")
     .slice(0, 120);
   return cleaned.length === 0 ? "function" : cleaned;
+};
+
+/** Remove a root this call created. A failed removal is reported, not hidden. */
+const removeCreatedRoot = async <T>(
+  root: string,
+  failure: Result<T, AnalysisError>,
+): Promise<Result<T, AnalysisError>> => {
+  const removed = await rm(root, { recursive: true, force: true }).then(
+    () => true,
+    () => false,
+  );
+  return removed
+    ? failure
+    : err(
+        decompileInputError(
+          "output_directory",
+          "The export could not be started, and its partly created output directory could not be removed. Remove it before retrying.",
+        ),
+      );
 };
 
 const STALE_TEMPORARY =

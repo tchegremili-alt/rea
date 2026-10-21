@@ -1,7 +1,8 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 
 import {
   createAnalysisExecution,
@@ -15,6 +16,7 @@ import {
   DECOMPILE_DIRECTORY_INDEX_NAME,
   DECOMPILE_DIRECTORY_JOURNAL_NAME,
   decompileDirectoryIndexSchema,
+  decompileJournalLineSchema,
 } from "../../contracts/decompileDirectory.js";
 import { createAnalysisProfile } from "../../domain/analysisProfile.js";
 import {
@@ -98,6 +100,7 @@ const harness = (options?: {
   readonly subject?: boolean;
   readonly mismatch?: string;
   readonly unprofiled?: string;
+  readonly foreignTarget?: string;
 }) => {
   const procedures = options?.procedures ?? [
     { address: "0x3000", name: "Bar::late" },
@@ -180,6 +183,9 @@ const harness = (options?: {
               ...(options?.unprofiled === address
                 ? {}
                 : { analysisProfile: selected }),
+              ...(options?.foreignTarget === address
+                ? { subject: { ...subject, sha256: "cd".repeat(32) } }
+                : {}),
               limitations: ["terminal call may cut the body"],
             }),
           ),
@@ -209,10 +215,7 @@ const of = (calls: readonly RecordedCall[], operation: AnalysisOperation) =>
 const useOutputDirectory = (): (() => string) => {
   let parent = "";
   beforeEach(async () => {
-    parent = await mkdtemp(join(tmpdir(), "rea-decompile-all-"));
-  });
-  afterEach(async () => {
-    await rm(parent, { recursive: true, force: true });
+    parent = await createTestTempDirectory("rea-decompile-all-");
   });
   return () => join(parent, "out");
 };
@@ -704,15 +707,50 @@ describe("decompile_all identity and recovery", () => {
     expect(of(other.calls, "procedure_pseudo_code")).toHaveLength(0);
   });
 
-  it("does not accept a decompiler observation without the export's profile", async () => {
-    const { tools } = harness({ unprofiled: "0x2000" });
+  it("does not accept a decompiler observation without the export's profile or for another target", async () => {
+    const { tools } = harness({
+      unprofiled: "0x2000",
+      foreignTarget: "0x3000",
+    });
     const result = await run(tools, directory());
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value).toMatchObject({ counts: { written: 2, failed: 1 } });
+    expect(result.value).toMatchObject({ counts: { written: 1, failed: 2 } });
     expect((result.value as { failures: unknown[] }).failures).toEqual([
       expect.objectContaining({ address: "0x2000", code: "profile_changed" }),
+      expect.objectContaining({ address: "0x3000", code: "target_changed" }),
     ]);
+  });
+
+  it("refuses to resume an export whose analysis profile is unknown", async () => {
+    expect((await run(harness().tools, directory())).ok).toBe(true);
+    const journalPath = join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME);
+    const original = await readFile(journalPath, "utf8");
+    await writeFile(
+      journalPath,
+      original.replace(
+        `"analysis_profile_digest":"${profile.digest}"`,
+        `"analysis_profile_digest":null`,
+      ),
+    );
+    const next = harness();
+    const resumed = await run(next.tools, directory(), { resume: true });
+    expect(resumed.ok).toBe(false);
+    if (!resumed.ok)
+      expect(resumed.error.userMessage).toContain("analysis profile digest");
+    expect(of(next.calls, "procedure_pseudo_code")).toHaveLength(0);
+  });
+
+  it("refuses resume when the output directory does not exist", async () => {
+    const { calls, tools } = harness();
+    const result = await run(tools, directory(), { resume: true });
+    expect(result.ok).toBe(false);
+    if (!result.ok)
+      expect(result.error.userMessage).toContain("existing export directory");
+    expect(calls).toHaveLength(0);
+    await expect(
+      readFile(join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME)),
+    ).rejects.toThrow();
   });
 
   it("exports addressed rows and counts inventory rows without an address", async () => {
@@ -739,7 +777,7 @@ describe("decompile_all identity and recovery", () => {
     const journalPath = join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME);
     await writeFile(
       journalPath,
-      `${await readFile(journalPath, "utf8")}{"kind":"function","addr`,
+      `${await readFile(journalPath, "utf8")}{"kind":"function","name":"é\u00e9`,
     );
     await writeFile(join(directory(), ".tmp-0123456789abcdef.c"), "partial");
     const resumed = await run(harness().tools, directory(), { resume: true });
@@ -748,8 +786,12 @@ describe("decompile_all identity and recovery", () => {
     expect(resumed.value).toMatchObject({
       counts: { written: 2, skipped: 1, failed: 0 },
     });
-    const lines = (await readFile(journalPath, "utf8")).trimEnd().split("\n");
-    expect(lines.every((line) => JSON.parse(line) !== null)).toBe(true);
+    const text = await readFile(journalPath, "utf8");
+    expect(text.endsWith("\n")).toBe(true);
+    for (const line of text.trimEnd().split("\n"))
+      expect(
+        decompileJournalLineSchema.safeParse(JSON.parse(line)).success,
+      ).toBe(true);
     await expect(
       readFile(join(directory(), ".tmp-0123456789abcdef.c")),
     ).rejects.toThrow();
