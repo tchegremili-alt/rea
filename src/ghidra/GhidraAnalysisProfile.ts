@@ -28,6 +28,12 @@ import {
   ghidraPowerPcProfileParameters,
 } from "./GhidraPowerPcProfile.js";
 import { ghidraRawBinaryLanguage } from "./GhidraRawBinaryLanguage.js";
+import {
+  ghidraDolLanguage,
+  ghidraDolLanguageUnsupportedReason,
+  ghidraDolProfileParameters,
+} from "./GhidraDolProfile.js";
+import type { JsonValue } from "../domain/jsonValue.js";
 
 import {
   ghidraProcessorUnsupportedReason,
@@ -59,6 +65,46 @@ export const ghidraPinnedLanguage = (
   ghidraRiscvLanguageOverride(target) ??
   ghidraPowerPcLanguage(target);
 
+/**
+ * Analysis policy shared by lanes that import one file image through
+ * BinaryLoader. Each lane adds its own loader, language, and entry facts.
+ */
+const binaryLoaderPolicy = (
+  target: Extract<BinaryTarget, { format: "raw-binary" | "gamecube-dol" }>,
+  installation: GhidraInstallationInspection,
+  analyzerParameters: Readonly<Record<string, JsonValue>>,
+): Readonly<Record<string, JsonValue>> => ({
+  target_kind: target.kind,
+  target_format: target.format,
+  architecture: target.architecture,
+  available_architectures: [...target.availableArchitectures].sort(),
+  import_mode: "ephemeral-source-immutable",
+  annotation_policy: "atomic-function-entry-metadata-v1",
+  load_image_observations: "source-mappings-entry-context-v2",
+  function_body_evidence: "complete-inclusive-ranges-v1",
+  function_references: "complete-body-and-entry-reference-manager-v2",
+  call_relationship_coverage: callRelationshipCoverage,
+  function_dossier_coverage: "observed-facets-and-call-relationships-v1",
+  string_inventory_evidence: "defined-data-coverage-v1",
+  location_resolution: "explicit-address-exact-entry-symbol-first-v3",
+  procedure_file_offset_resolution:
+    "address-first-unique-target-source-mapping-v2",
+  instruction_flow_evidence: "decoded-return-pcode-v1",
+  instruction_references: instructionReferenceCoverage,
+  function_boundary_observations: functionBoundaryObservations,
+  no_return_repair:
+    installation.platform === "win32"
+      ? "disabled-windows-p0"
+      : "returning-imports-decoded-return-v2",
+  process_launch:
+    installation.platform === "win32"
+      ? "official-headless-script-v1"
+      : "inspected-jvm-launch-support-v1",
+  jump_table_evidence: "typed-case-default-blocks-v1",
+  decompiler_jump_loads: true,
+  ...analyzerParameters,
+});
+
 /** Resolve version-bound, deterministic semantics before Ghidra imports a target. */
 export const resolveGhidraAnalysisProfile = async (
   target: BinaryTarget,
@@ -75,17 +121,6 @@ export const resolveGhidraAnalysisProfile = async (
     );
   if (target.kind !== "executable")
     return Promise.resolve(ok({ profile: null }));
-  // TODO(4b): replace this refusal with the BinaryLoader + ReaGhidraPrepareDol import.
-  if (target.format === "gamecube-dol")
-    return Promise.resolve(
-      err(
-        new AnalysisUnsupportedTargetError(
-          "resolve_analysis_profile",
-          target.path,
-          "GameCube DOL Ghidra import is not yet implemented",
-        ),
-      ),
-    );
   if (installation.status === "unavailable")
     return Promise.resolve(
       err(new ProviderAdapterError(identity.id, "resolve_analysis_profile")),
@@ -122,6 +157,39 @@ export const resolveGhidraAnalysisProfile = async (
           analyzer_preset: `ghidra-default+disabled:${disabledAnalyzers.join(",")}`,
           analysis_options: { disabled_analyzers: [...disabledAnalyzers] },
         };
+  if (target.format === "gamecube-dol") {
+    // The DOL admission owns the processor family; only a BE32 PowerPC variant may replace the stock language.
+    const reason = ghidraDolLanguageUnsupportedReason(languageOverride);
+    if (reason !== null)
+      return Promise.resolve(
+        err(
+          new AnalysisUnsupportedTargetError(
+            "resolve_analysis_profile",
+            target.path,
+            reason,
+          ),
+        ),
+      );
+    const language = ghidraDolLanguage(languageOverride);
+    return Promise.resolve(
+      ok({
+        profile: createAnalysisProfile(provider, {
+          ...binaryLoaderPolicy(target, installation, analyzerParameters),
+          load_image_evidence: "independent-dol-section-mapping-v1",
+          loader: "BinaryLoader",
+          language_id: language.languageId,
+          compiler_spec_id: language.compilerSpecId ?? "language-default",
+          language_selection:
+            languageOverride === undefined
+              ? "provider-pinned-v1"
+              : "configured-v1",
+          entry_point: target.entryPoint,
+          entry_seed: "external-entry-and-function-before-analysis-v1",
+          ...ghidraDolProfileParameters(target.dol),
+        }),
+      }),
+    );
+  }
   if (target.format === "raw-binary") {
     if (languageOverride !== undefined)
       return Promise.resolve(
@@ -137,43 +205,14 @@ export const resolveGhidraAnalysisProfile = async (
     return Promise.resolve(
       ok({
         profile: createAnalysisProfile(provider, {
-          target_kind: target.kind,
-          target_format: target.format,
-          architecture: target.architecture,
-          available_architectures: [...target.availableArchitectures].sort(),
-          import_mode: "ephemeral-source-immutable",
-          annotation_policy: "atomic-function-entry-metadata-v1",
-          load_image_observations: "source-mappings-entry-context-v2",
-          function_body_evidence: "complete-inclusive-ranges-v1",
-          function_references: "complete-body-and-entry-reference-manager-v2",
-          call_relationship_coverage: callRelationshipCoverage,
-          function_dossier_coverage:
-            "observed-facets-and-call-relationships-v1",
-          string_inventory_evidence: "defined-data-coverage-v1",
-          location_resolution: "explicit-address-exact-entry-symbol-first-v3",
-          procedure_file_offset_resolution:
-            "address-first-unique-target-source-mapping-v2",
-          instruction_flow_evidence: "decoded-return-pcode-v1",
-          instruction_references: instructionReferenceCoverage,
-          function_boundary_observations: functionBoundaryObservations,
-          no_return_repair:
-            installation.platform === "win32"
-              ? "disabled-windows-p0"
-              : "returning-imports-decoded-return-v2",
-          process_launch:
-            installation.platform === "win32"
-              ? "official-headless-script-v1"
-              : "inspected-jvm-launch-support-v1",
+          ...binaryLoaderPolicy(target, installation, analyzerParameters),
           load_image_evidence: "independent-raw-mapping-context-v4",
-          jump_table_evidence: "typed-case-default-blocks-v1",
-          decompiler_jump_loads: true,
           loader: "BinaryLoader",
           language_id: language.languageId,
           compiler_spec_id: language.compilerSpecId,
           language_selection: "caller-supplied-v1",
           entry_point: target.entryPoint,
           entry_seed: "external-entry-and-function-before-analysis-v1",
-          ...analyzerParameters,
         }),
       }),
     );

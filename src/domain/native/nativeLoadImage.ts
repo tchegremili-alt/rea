@@ -122,6 +122,29 @@ export const nativeLoadImageSchema = z.union([
     checks: z.array(nativeLoadImageCheckSchema),
     limitations: z.array(z.string().min(1)),
   }),
+  z.strictObject({
+    status: z.enum(["verified", "mismatch"]),
+    format: z.literal("gamecube-dol"),
+    target_sha256: digest,
+    architecture: z.literal("powerpc"),
+    language_id: z.string().min(1),
+    compiler_spec_id: z.string().min(1),
+    file_bytes: integer.min(1),
+    entry: z.strictObject({ address: address }),
+    sections: z.array(
+      z.strictObject({
+        kind: z.enum(["text", "data"]),
+        index: integer,
+        file_offset: address,
+        address: address,
+        size: address,
+      }),
+    ),
+    bss: z.strictObject({ address: address, size: address }),
+    observations: nativeLoadImageObservationSchema,
+    checks: z.array(nativeLoadImageCheckSchema),
+    limitations: z.array(z.string().min(1)),
+  }),
 ]);
 
 /** Provider-neutral native load-image result. */
