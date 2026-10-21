@@ -63,6 +63,8 @@ interface FailureReason {
 }
 
 interface PublishState {
+  /** Functions this call took on after skipping verified files; bounded by limit. */
+  attempted: number;
   written: number;
   failed: number;
   skipped: number;
@@ -108,6 +110,7 @@ export const decompileAll = async (
   if (!opened.ok) return opened;
   const session = opened.value;
   const state: PublishState = {
+    attempted: 0,
     written: 0,
     failed: 0,
     skipped: 0,
@@ -289,11 +292,9 @@ const publishSelected = async (input: {
       input.state.skipped += 1;
       continue;
     }
-    if (
-      input.limit !== undefined &&
-      input.state.written + input.state.failed >= input.limit
-    )
+    if (input.limit !== undefined && input.state.attempted >= input.limit)
       continue;
+    input.state.attempted += 1;
     if (existing === "conflict") {
       const reason = {
         code: "output_exists",

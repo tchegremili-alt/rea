@@ -797,6 +797,34 @@ describe("decompile_all identity and recovery", () => {
     ).rejects.toThrow();
   });
 
+  it("keeps a function's file name after a failed retry that recorded no path", async () => {
+    expect((await run(harness().tools, directory())).ok).toBe(true);
+    await rm(join(directory(), "functions/0x1000.c"));
+    const failing = harness({ fail: { "0x1000": "timeout" } });
+    expect((await run(failing.tools, directory(), { resume: true })).ok).toBe(
+      true,
+    );
+    const retried = await run(harness().tools, directory(), { resume: true });
+    expect(retried.ok).toBe(true);
+    if (!retried.ok) return;
+    expect(retried.value).toMatchObject({ counts: { written: 1, skipped: 2 } });
+    await expect(
+      readFile(join(directory(), "functions/0x1000.c"), "utf8"),
+    ).resolves.toContain(sentinel);
+    const index = decompileDirectoryIndexSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(directory(), DECOMPILE_DIRECTORY_INDEX_NAME),
+          "utf8",
+        ),
+      ),
+    );
+    expect(
+      index.functions.find((record) => record.address === "0x1000")
+        ?.relative_path,
+    ).toBe("functions/0x1000.c");
+  });
+
   it("tries functions not yet attempted before retrying recorded failures", async () => {
     const failing = { fail: { "0x1000": "timeout" as const } };
     expect(

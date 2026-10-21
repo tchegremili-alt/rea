@@ -100,7 +100,7 @@ export class DecompileExport {
     readonly root: string,
     private readonly journal: FileHandle,
     private readonly records: Map<string, DecompileDirectoryFunctionRecord>,
-    private readonly usedPaths: Set<string>,
+    private readonly paths: PathReservations,
     private readonly identity: ExportIdentity,
   ) {}
 
@@ -117,12 +117,15 @@ export class DecompileExport {
     return this.records.get(address);
   }
 
-  /** Stable relative path for an address. A journal path wins over a new name. */
+  /**
+   * Stable relative path for an address. The first path the journal gave this
+   * address wins, even when a later failure record names no path.
+   */
   pathFor(address: string): string {
-    const prior = this.records.get(address)?.relative_path;
-    if (prior !== undefined) return prior;
-    const relativePath = allocateFunctionPath(address, this.usedPaths);
-    this.usedPaths.add(relativePath);
+    const owned = this.paths.byAddress.get(address);
+    if (owned !== undefined) return owned;
+    const relativePath = allocateFunctionPath(address, this.paths.byPath);
+    reservePath(this.paths, relativePath, address);
     return relativePath;
   }
 
@@ -156,7 +159,7 @@ export class DecompileExport {
       );
     this.records.set(record.address, record);
     if (record.relative_path !== undefined)
-      this.usedPaths.add(record.relative_path);
+      reservePath(this.paths, record.relative_path, record.address);
     return ok(undefined);
   }
 
@@ -227,7 +230,13 @@ export class DecompileExport {
     const opened = await seedJournal(root, identity);
     if (!opened.ok) return removeCreatedRoot(root, opened);
     return ok(
-      new DecompileExport(root, opened.value, new Map(), new Set(), identity),
+      new DecompileExport(
+        root,
+        opened.value,
+        new Map(),
+        { byPath: new Map(), byAddress: new Map() },
+        identity,
+      ),
     );
   }
 
@@ -264,7 +273,7 @@ export class DecompileExport {
         root,
         handle.value,
         opened.value.records,
-        opened.value.usedPaths,
+        opened.value.paths,
         identity,
       ),
     );
@@ -478,7 +487,7 @@ const openJournal = async (
 
 interface OpenedJournal {
   readonly records: Map<string, DecompileDirectoryFunctionRecord>;
-  readonly usedPaths: Set<string>;
+  readonly paths: PathReservations;
   /** Byte length of the newline-terminated lines. */
   readonly committedBytes: number;
   /** Byte length of the journal file as read. */
@@ -514,7 +523,7 @@ const readJournal = async (
   return sameIdentity(parsed.value.header, identity)
     ? ok({
         records: parsed.value.records,
-        usedPaths: parsed.value.usedPaths,
+        paths: parsed.value.paths,
         committedBytes: parsed.value.committedBytes,
         journalBytes: parsed.value.journalBytes,
       })
@@ -543,7 +552,7 @@ const parseJournal = (
   const records = new Map<string, DecompileDirectoryFunctionRecord>();
   // A path stays reserved by the first address that used it, even when that
   // address's latest record no longer names it.
-  const pathOwners = new Map<string, string>();
+  const paths: PathReservations = { byPath: new Map(), byAddress: new Map() };
   for (const line of lines.slice(1)) {
     const parsed = decompileJournalLineSchema.safeParse(parseJson(line));
     if (!parsed.success || parsed.data.kind !== "function")
@@ -554,17 +563,17 @@ const parseJournal = (
       return err(incompatibleJournal());
     const path = accepted.data.relative_path;
     if (path !== undefined) {
-      const owner = pathOwners.get(path);
+      const owner = paths.byPath.get(path);
       if (owner !== undefined && owner !== accepted.data.address)
         return err(incompatibleJournal());
-      pathOwners.set(path, accepted.data.address);
+      reservePath(paths, path, accepted.data.address);
     }
     records.set(accepted.data.address, accepted.data);
   }
   return ok({
     header: header.data,
     records,
-    usedPaths: new Set(pathOwners.keys()),
+    paths,
     committedBytes,
     journalBytes: bytes.length,
   });
@@ -644,9 +653,24 @@ const omitEmpty = (
   ...(record.failure === undefined ? {} : { failure: record.failure }),
 });
 
+/** Function file paths: each path has one owning address, each address keeps its first path. */
+interface PathReservations {
+  readonly byPath: Map<string, string>;
+  readonly byAddress: Map<string, string>;
+}
+
+const reservePath = (
+  paths: PathReservations,
+  path: string,
+  address: string,
+): void => {
+  if (!paths.byPath.has(path)) paths.byPath.set(path, address);
+  if (!paths.byAddress.has(address)) paths.byAddress.set(address, path);
+};
+
 const allocateFunctionPath = (
   address: string,
-  used: ReadonlySet<string>,
+  used: ReadonlyMap<string, string>,
 ): string => {
   const base = sanitizeAddress(address);
   const directory = DECOMPILE_DIRECTORY_FUNCTIONS_DIRECTORY;
