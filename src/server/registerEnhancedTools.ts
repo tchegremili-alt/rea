@@ -282,7 +282,6 @@ const executeEnhancedTool = async (
           return registration.delivery.toCallToolResult(recorded, contract);
         if (
           name !== "trace_native_ui_action" &&
-          name !== "decompile_all" &&
           registration.allowsSnapshotReplay?.(name) === true
         ) {
           const workflowRecord = workflowSnapshotRecord(

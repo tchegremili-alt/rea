@@ -49,9 +49,13 @@ const DWARF_LAYOUT_UNAVAILABLE =
 const BODY_UNAVAILABLE =
   "procedure_info is unavailable, so function body ranges are unknown.";
 const TARGET_DIGEST_UNAVAILABLE =
-  "Target SHA-256 was not observed. Resume can only match another export that also has no target digest.";
+  "Target SHA-256 was not observed, so this export cannot be resumed.";
+const PROFILE_UNAVAILABLE =
+  "The provider did not commit an analysis profile, so this export cannot be resumed.";
 const DUPLICATE_ADDRESSES =
   "Duplicate procedure addresses were collapsed to the first inventory row.";
+const unaddressedRows = (count: number): string =>
+  `${count.toString()} inventory row(s) had no address and were not exported.`;
 
 interface FailureReason {
   readonly code: string;
@@ -110,50 +114,65 @@ export const decompileAll = async (
     failures: [],
     bodyUnavailable: false,
   };
-  try {
-    const published = await publishSelected({
-      analysis,
-      session,
-      procedures: selection.procedures,
+  const published = await publishSelected({
+    analysis,
+    session,
+    procedures: attemptOrder(session, selection.procedures),
+    identity: loaded.value.identity,
+    signal,
+    limit: input.limit,
+    state,
+  });
+  const limitations = exportLimitations(
+    input.layout,
+    loaded.value.identity,
+    selection.collapsedDuplicates,
+    state.bodyUnavailable,
+    loaded.value.unaddressed,
+  );
+  const indexed = await session.writeIndex({
+    layoutStatus: layoutStatus(input.layout),
+    limitations,
+  });
+  const closed = await session.close();
+  if (!published.ok) return published;
+  if (!indexed.ok) return indexed;
+  if (!closed.ok) return closed;
+  const manifest = decompileDirectoryManifestSchema.safeParse(
+    manifestOf({
+      root: session.root,
+      input,
       identity: loaded.value.identity,
-      signal,
-      limit: input.limit,
+      selected: selection.procedures.length,
+      excluded: selection.excluded,
       state,
-    });
-    const limitations = exportLimitations(
-      input.layout,
-      loaded.value.identity,
-      selection.collapsedDuplicates,
-      state.bodyUnavailable,
-    );
-    const indexed = await session.writeIndex({
-      layoutStatus: layoutStatus(input.layout),
       limitations,
-    });
-    if (!published.ok) return published;
-    if (!indexed.ok) return indexed;
-    const manifest = decompileDirectoryManifestSchema.safeParse(
-      manifestOf({
-        root: session.root,
-        input,
-        identity: loaded.value.identity,
-        selected: selection.procedures.length,
-        excluded: selection.excluded,
-        state,
-        limitations,
-      }),
-    );
-    return manifest.success
-      ? ok(manifest.data)
-      : err(
-          new AnalysisOutputError(
-            "decompile_all",
-            "decompile manifest could not be built",
-          ),
-        );
-  } finally {
-    await session.close();
-  }
+    }),
+  );
+  return manifest.success
+    ? ok(manifest.data)
+    : err(
+        new AnalysisOutputError(
+          "decompile_all",
+          "decompile manifest could not be built",
+        ),
+      );
+};
+
+/**
+ * Functions with no recorded failure go first, so a limited resume reaches
+ * new work instead of retrying the same failures every call.
+ */
+const attemptOrder = (
+  session: DecompileExport,
+  procedures: readonly SelectedProcedure[],
+): readonly SelectedProcedure[] => {
+  const failedBefore = (procedure: SelectedProcedure): boolean =>
+    session.record(procedure.address)?.status === "failed";
+  return [
+    ...procedures.filter((procedure) => !failedBefore(procedure)),
+    ...procedures.filter(failedBefore),
+  ];
 };
 
 const loadProcedures = async (
@@ -165,6 +184,7 @@ const loadProcedures = async (
     {
       readonly procedures: readonly SelectedProcedure[];
       readonly identity: ExportIdentity;
+      readonly unaddressed: number;
     },
     AnalysisError
   >
@@ -185,12 +205,15 @@ const loadProcedures = async (
     );
   const identity = identityFrom(observed.value, layout);
   if (!identity.ok) return identity;
+  // An empty address cannot name a file or a journal record.
+  const addressed = parsed.data.filter((row) => row.address.length > 0);
   return ok({
-    procedures: parsed.data.map((row) => ({
+    procedures: addressed.map((row) => ({
       address: row.address,
       name: row.value.length === 0 ? null : row.value,
     })),
     identity: identity.value,
+    unaddressed: parsed.data.length - addressed.length,
   });
 };
 
@@ -282,15 +305,18 @@ const publishSelected = async (input: {
       continue;
     }
     if (existing === "io") {
-      recordFailure(input.state, procedure, {
+      const reason = {
         code: "output_io",
         message: "The existing function file could not be read.",
-      });
+      };
+      recordFailure(input.state, procedure, reason);
       const appended = await input.session.append(
-        failureRecord(procedure, unavailableBody("not read"), {
-          code: "output_io",
-          message: "The existing function file could not be read.",
-        }),
+        failureRecord(
+          procedure,
+          retainedBody(input.session, procedure.address),
+          reason,
+          input.session.pathFor(procedure.address),
+        ),
       );
       if (!appended.ok) return appended;
       continue;
@@ -318,19 +344,6 @@ const publishOne = async (input: {
   readonly result: Result<void, AnalysisError>;
   readonly bodySupport: "unknown" | "unavailable";
 }> => {
-  if (input.procedure.address.length === 0) {
-    const reason = {
-      code: "unresolved_identity",
-      message: "The procedure address is empty.",
-    };
-    recordFailure(input.state, input.procedure, reason);
-    return {
-      result: await input.session.append(
-        failureRecord(input.procedure, unavailableBody(reason.message), reason),
-      ),
-      bodySupport: input.bodySupport,
-    };
-  }
   const body = await readBody(
     input.analysis,
     input.procedure.address,
@@ -544,8 +557,16 @@ const observationMatches = (
     provider.version !== identity.provider.version
   )
     return false;
-  const digest = execution.analysisProfile?.digest;
-  return digest === undefined || digest === identity.analysisProfileDigest;
+  // A missing profile is unknown, not a match for a committed one.
+  if (
+    (execution.analysisProfile?.digest ?? null) !==
+    identity.analysisProfileDigest
+  )
+    return false;
+  // A per-function observation may omit its subject; one that names a
+  // different target is not this export's target.
+  const target = execution.subject?.sha256;
+  return target === undefined || target === identity.targetSha256;
 };
 
 const failureReason = (error: AnalysisError): FailureReason => {
@@ -597,18 +618,7 @@ const retainedBody = (
   session: DecompileExport,
   address: string,
 ): FunctionBody => {
-  const body = session.record(address)?.body;
-  if (body === undefined) return unavailableBody("not rewritten");
-  return body.available
-    ? {
-        available: true,
-        ranges: body.ranges.map((range) => ({
-          start: range.start,
-          end: range.end,
-        })),
-        non_contiguous: body.non_contiguous,
-      }
-    : unavailableBody(body.reason);
+  return session.record(address)?.body ?? unavailableBody("not rewritten");
 };
 
 const exportLimitations = (
@@ -616,10 +626,13 @@ const exportLimitations = (
   identity: ExportIdentity,
   collapsedDuplicates: boolean,
   bodyUnavailable: boolean,
+  unaddressed: number,
 ): readonly string[] => [
   ...(layout === "dwarf" ? [DWARF_LAYOUT_UNAVAILABLE] : []),
   ...(identity.targetSha256 === null ? [TARGET_DIGEST_UNAVAILABLE] : []),
+  ...(identity.analysisProfileDigest === null ? [PROFILE_UNAVAILABLE] : []),
   ...(collapsedDuplicates ? [DUPLICATE_ADDRESSES] : []),
+  ...(unaddressed > 0 ? [unaddressedRows(unaddressed)] : []),
   ...(bodyUnavailable ? [BODY_UNAVAILABLE] : []),
 ];
 

@@ -11,6 +11,7 @@ import {
 import type { CliInstance } from "./types.js";
 import { absoluteCallerPath } from "../filesystem/callerPath.js";
 import type { JsonValue } from "../domain/jsonValue.js";
+import { DECOMPILE_DIRECTORY_MAX_LIMIT } from "../contracts/decompileDirectory.js";
 
 /** Register `rea decompile-all`, the directory export of provider pseudocode. */
 export const registerDecompileDirectoryCommand = (
@@ -69,14 +70,16 @@ export const registerDecompileDirectoryCommand = (
         .number()
         .int()
         .min(1)
-        .max(100_000)
+        .max(DECOMPILE_DIRECTORY_MAX_LIMIT)
         .optional()
         .describe("Maximum functions to attempt after skipping verified files"),
       snapshot: z
         .string()
         .min(1)
         .optional()
-        .describe("Load and update a local analysis snapshot"),
+        .describe(
+          "Load a local analysis snapshot. decompile-all does not update it.",
+        ),
       ...nativeOpenOptionFields,
     }),
     run: ({ args, options }) =>

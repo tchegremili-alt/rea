@@ -76,7 +76,7 @@ export const decompileDirectoryInputSchema = z.strictObject({
     .boolean()
     .default(false)
     .describe(
-      "Continue a journal for the same target SHA-256, provider, analysis profile, and layout. Verified files are skipped and conflicting files are left unchanged.",
+      "Continue a journal for the same target SHA-256, provider, analysis profile, and layout. Both digests must be known. Verified files are skipped, conflicting files are left unchanged, and functions not yet tried run before retries of recorded failures.",
     ),
   name: z
     .string()
@@ -147,7 +147,7 @@ export const decompileDirectoryManifestSchema = z
       written: countSchema("Function files created by this call."),
       failed: countSchema("Functions this call could not write."),
       skipped: countSchema(
-        "Selected functions whose existing files still match the journal.",
+        "Selected functions whose existing files already hold the same bytes, whether recorded in the journal or found on disk.",
       ),
       remaining: countSchema(
         "Selected functions not attempted because the limit was reached.",

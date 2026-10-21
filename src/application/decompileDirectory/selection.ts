@@ -143,7 +143,7 @@ const compareProcedures = (
   left: SelectedProcedure,
   right: SelectedProcedure,
 ): number => {
-  const byAddress = compareAddresses(left.address, right.address);
+  const byAddress = compareProcedureAddresses(left.address, right.address);
   if (byAddress !== 0) return byAddress;
   const byName = compareUnicodeCodePoints(left.name ?? "", right.name ?? "");
   return byName === 0
@@ -151,7 +151,11 @@ const compareProcedures = (
     : byName;
 };
 
-const compareAddresses = (left: string, right: string): number => {
+/** Numeric order within an address space; unparsed addresses sort last. */
+export const compareProcedureAddresses = (
+  left: string,
+  right: string,
+): number => {
   const a = addressCoordinate(left);
   const b = addressCoordinate(right);
   if (a === null || b === null) {

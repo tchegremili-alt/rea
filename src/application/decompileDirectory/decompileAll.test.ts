@@ -97,6 +97,7 @@ const harness = (options?: {
   readonly info?: "ok" | "unavailable" | "error";
   readonly subject?: boolean;
   readonly mismatch?: string;
+  readonly unprofiled?: string;
 }) => {
   const procedures = options?.procedures ?? [
     { address: "0x3000", name: "Bar::late" },
@@ -176,7 +177,9 @@ const harness = (options?: {
         return Promise.resolve(
           ok(
             createAnalysisExecution(`int fn(void) { ${sentinel} }`, provider, {
-              analysisProfile: selected,
+              ...(options?.unprofiled === address
+                ? {}
+                : { analysisProfile: selected }),
               limitations: ["terminal call may cut the body"],
             }),
           ),
@@ -395,7 +398,7 @@ describe("decompile_all resume", () => {
     if (!mismatched.ok)
       expect(mismatched.error.userMessage).toContain("does not match");
 
-    await writeFile(journalPath, `${original}\nnot-json`);
+    await writeFile(journalPath, `${original}not-json\n`);
     const broken = await run(harness().tools, directory(), { resume: true });
     expect(broken.ok).toBe(false);
     if (!broken.ok)
@@ -477,7 +480,7 @@ describe("decompile_all filters and layout", () => {
     expect(names).not.toContain("Foo/");
   });
 
-  it("keeps a non-contiguous body in the file header when procedure_info fails open", async () => {
+  it("keeps a non-contiguous procedure_info body in the file header", async () => {
     const procedures = [{ address: "0x1000", name: "main" }];
     const calls: RecordedCall[] = [];
     const port: AnalysisOperationPort = {
@@ -599,7 +602,7 @@ describe("decompile_all partial results", () => {
       execute: (operation, parameters) => {
         if (
           operation === "procedure_pseudo_code" &&
-          parameters.procedure === "0x1000"
+          parameters.procedure === "0x2000"
         )
           controller.abort();
         if (operation === "list_procedures")
@@ -645,14 +648,28 @@ describe("decompile_all partial results", () => {
     if (result.ok) return;
     expect(result.error).toBeInstanceOf(AnalysisCancelledError);
     await expect(
-      readFile(join(directory(), "functions/0x1000.c")),
+      readFile(join(directory(), "functions/0x1000.c"), "utf8"),
+    ).resolves.toContain("int cancelled(void)");
+    await expect(
+      readFile(join(directory(), "functions/0x2000.c")),
     ).rejects.toThrow();
-    const resumed = await run(harness({ procedures }).tools, directory(), {
-      resume: true,
-    });
+    const index = decompileDirectoryIndexSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(directory(), DECOMPILE_DIRECTORY_INDEX_NAME),
+          "utf8",
+        ),
+      ),
+    );
+    expect(index.functions.map((record) => record.address)).toEqual(["0x1000"]);
+    const next = harness({ procedures });
+    const resumed = await run(next.tools, directory(), { resume: true });
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
-    expect(resumed.value).toMatchObject({ counts: { written: 2, skipped: 0 } });
+    expect(resumed.value).toMatchObject({ counts: { written: 1, skipped: 1 } });
+    expect(
+      of(next.calls, "procedure_pseudo_code").map((call) => call.procedure),
+    ).toEqual(["0x2000"]);
   });
 
   it("rejects an inverted address range before creating a directory or calling a provider", async () => {
@@ -665,8 +682,12 @@ describe("decompile_all partial results", () => {
     expect(calls).toHaveLength(0);
     await expect(readFile(directory())).rejects.toThrow();
   });
+});
 
-  it("records an empty target digest when the observation has no subject", async () => {
+describe("decompile_all identity and recovery", () => {
+  const directory = useOutputDirectory();
+
+  it("records an empty target digest and refuses to resume an unknown target", async () => {
     const { tools } = harness({ subject: false });
     const result = await run(tools, directory());
     expect(result.ok).toBe(true);
@@ -675,5 +696,82 @@ describe("decompile_all partial results", () => {
     expect(
       (result.value as { limitations: string[] }).limitations.join("\n"),
     ).toContain("SHA-256");
+    const other = harness({ subject: false });
+    const resumed = await run(other.tools, directory(), { resume: true });
+    expect(resumed.ok).toBe(false);
+    if (!resumed.ok)
+      expect(resumed.error.userMessage).toContain("target SHA-256");
+    expect(of(other.calls, "procedure_pseudo_code")).toHaveLength(0);
+  });
+
+  it("does not accept a decompiler observation without the export's profile", async () => {
+    const { tools } = harness({ unprofiled: "0x2000" });
+    const result = await run(tools, directory());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toMatchObject({ counts: { written: 2, failed: 1 } });
+    expect((result.value as { failures: unknown[] }).failures).toEqual([
+      expect.objectContaining({ address: "0x2000", code: "profile_changed" }),
+    ]);
+  });
+
+  it("exports addressed rows and counts inventory rows without an address", async () => {
+    const { tools } = harness({
+      procedures: [
+        { address: "", name: "ghost" },
+        { address: "0x1000", name: "main" },
+      ],
+    });
+    const result = await run(tools, directory());
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toMatchObject({
+      counts: { selected: 1, written: 1, failed: 0 },
+    });
+    expect(
+      (result.value as { limitations: string[] }).limitations.join("\n"),
+    ).toContain("1 inventory row(s) had no address");
+  });
+
+  it("resumes after a torn final journal line and keeps the journal parseable", async () => {
+    const first = harness();
+    expect((await run(first.tools, directory(), { limit: 1 })).ok).toBe(true);
+    const journalPath = join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME);
+    await writeFile(
+      journalPath,
+      `${await readFile(journalPath, "utf8")}{"kind":"function","addr`,
+    );
+    await writeFile(join(directory(), ".tmp-0123456789abcdef.c"), "partial");
+    const resumed = await run(harness().tools, directory(), { resume: true });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value).toMatchObject({
+      counts: { written: 2, skipped: 1, failed: 0 },
+    });
+    const lines = (await readFile(journalPath, "utf8")).trimEnd().split("\n");
+    expect(lines.every((line) => JSON.parse(line) !== null)).toBe(true);
+    await expect(
+      readFile(join(directory(), ".tmp-0123456789abcdef.c")),
+    ).rejects.toThrow();
+  });
+
+  it("tries functions not yet attempted before retrying recorded failures", async () => {
+    const failing = { fail: { "0x1000": "timeout" as const } };
+    expect(
+      (await run(harness(failing).tools, directory(), { limit: 1 })).ok,
+    ).toBe(true);
+    const next = harness(failing);
+    const resumed = await run(next.tools, directory(), {
+      resume: true,
+      limit: 1,
+    });
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(
+      of(next.calls, "procedure_pseudo_code").map((call) => call.procedure),
+    ).toEqual(["0x2000"]);
+    expect(resumed.value).toMatchObject({
+      counts: { written: 1, failed: 0, remaining: 2 },
+    });
   });
 });

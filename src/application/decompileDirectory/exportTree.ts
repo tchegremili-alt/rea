@@ -5,6 +5,7 @@ import {
   mkdir,
   open,
   link,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -33,8 +34,8 @@ import {
 import type { AnalysisError } from "../../domain/analysisErrorBase.js";
 import { isPathWithinRoot } from "../../domain/localPath.js";
 import { err, ok, type Result } from "../../domain/result.js";
-import { compareUnicodeCodePoints } from "../../domain/unicodeCodePointOrder.js";
 import { decompileInputError } from "./inputError.js";
+import { compareProcedureAddresses } from "./selection.js";
 
 export interface ExportIdentity {
   readonly targetSha256: string | null;
@@ -154,6 +155,18 @@ export class DecompileExport {
     readonly layoutStatus: "address" | "debug_layout_unavailable";
     readonly limitations: readonly string[];
   }): Promise<Result<void, AnalysisError>> {
+    // The journal owns the outcomes. Rebuild from disk so a concurrent run's
+    // appended records are not dropped by this run's in-memory view.
+    const journal = await readJournalText(this.root);
+    const parsed =
+      typeof journal === "string" ? parseJournal(journal) : undefined;
+    if (parsed === undefined || !parsed.ok)
+      return err(
+        new AnalysisOutputError(
+          "decompile_all",
+          "decompile index could not be built",
+        ),
+      );
     const index = decompileDirectoryIndexSchema.safeParse({
       version: 1,
       target_sha256: this.identity.targetSha256,
@@ -162,8 +175,8 @@ export class DecompileExport {
       layout: this.identity.layout,
       layout_status: input.layoutStatus,
       limitations: [...input.limitations],
-      functions: [...this.records.values()].sort((left, right) =>
-        compareUnicodeCodePoints(left.address, right.address),
+      functions: [...parsed.value.records.values()].sort((left, right) =>
+        compareProcedureAddresses(left.address, right.address),
       ),
     });
     if (!index.success)
@@ -179,8 +192,19 @@ export class DecompileExport {
     );
   }
 
-  async close(): Promise<void> {
-    await this.journal.close();
+  async close(): Promise<Result<void, AnalysisError>> {
+    const closed = await this.journal.close().then(
+      () => true,
+      () => false,
+    );
+    return closed
+      ? ok(undefined)
+      : err(
+          new AnalysisOutputError(
+            "decompile_all",
+            "decompile journal could not be closed",
+          ),
+        );
   }
 
   static async #create(
@@ -189,14 +213,16 @@ export class DecompileExport {
   ): Promise<Result<DecompileExport, AnalysisError>> {
     const created = await createPrivateDirectory(root);
     if (!created.ok) return created;
+    // This call created root, so it owns the cleanup. A failed removal leaves
+    // the directory for the caller; the original error is still returned.
     const functions = await prepareFunctionsDirectory(root);
     if (!functions.ok) {
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
       return functions;
     }
     const opened = await seedJournal(root, identity);
     if (!opened.ok) {
-      await rm(root, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
       return opened;
     }
     return ok(
@@ -212,18 +238,34 @@ export class DecompileExport {
     if (!opened.ok) return opened;
     const functions = await prepareFunctionsDirectory(root);
     if (!functions.ok) return functions;
+    await removeStaleTemporaries(root);
     const handle = await openJournal(root, "a");
-    return handle.ok
-      ? ok(
-          new DecompileExport(
-            root,
-            handle.value,
-            opened.value.records,
-            opened.value.usedPaths,
-            identity,
-          ),
-        )
-      : handle;
+    if (!handle.ok) return handle;
+    // Drop a torn final line left by a crash so the next append starts a line.
+    const repaired = await handle.value
+      .truncate(opened.value.committedBytes)
+      .then(
+        () => true,
+        () => false,
+      );
+    if (!repaired) {
+      await handle.value.close().catch(() => undefined);
+      return err(
+        decompileInputError(
+          "output_directory",
+          "The decompile journal could not be repaired after an interrupted write.",
+        ),
+      );
+    }
+    return ok(
+      new DecompileExport(
+        root,
+        handle.value,
+        opened.value.records,
+        opened.value.usedPaths,
+        identity,
+      ),
+    );
   }
 }
 
@@ -378,7 +420,7 @@ const seedJournal = async (
   root: string,
   identity: ExportIdentity,
 ): Promise<Result<FileHandle, AnalysisError>> => {
-  const header = decompileJournalHeaderSchema.parse({
+  const header = decompileJournalHeaderSchema.safeParse({
     kind: "header",
     version: 1,
     target_sha256: identity.targetSha256,
@@ -386,10 +428,17 @@ const seedJournal = async (
     analysis_profile_digest: identity.analysisProfileDigest,
     layout: identity.layout,
   });
+  if (!header.success)
+    return err(
+      new AnalysisOutputError(
+        "decompile_all",
+        "decompile journal header is invalid",
+      ),
+    );
   const opened = await openJournal(root, "wx");
   if (!opened.ok) return opened;
   const seeded = await opened.value
-    .write(`${JSON.stringify(header)}\n`)
+    .write(`${JSON.stringify(header.data)}\n`)
     .then(() => opened.value.sync())
     .then(() => chmod(join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME), 0o600))
     .then(
@@ -428,16 +477,20 @@ const openJournal = async (
 interface OpenedJournal {
   readonly records: Map<string, DecompileDirectoryFunctionRecord>;
   readonly usedPaths: Set<string>;
+  /** UTF-8 length of the newline-terminated lines. */
+  readonly committedBytes: number;
 }
+
+const readJournalText = (root: string): Promise<unknown> =>
+  readFile(join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME), "utf8").catch(
+    (cause: unknown) => cause,
+  );
 
 const readJournal = async (
   root: string,
   identity: ExportIdentity,
 ): Promise<Result<OpenedJournal, AnalysisError>> => {
-  const text = await readFile(
-    join(root, DECOMPILE_DIRECTORY_JOURNAL_NAME),
-    "utf8",
-  ).catch((cause: unknown) => cause);
+  const text = await readJournalText(root);
   if (typeof text !== "string")
     return err(
       nodeCode(text) === "ENOENT"
@@ -452,8 +505,14 @@ const readJournal = async (
     );
   const parsed = parseJournal(text);
   if (!parsed.ok) return parsed;
+  const unknown = unknownIdentity(parsed.value.header, identity);
+  if (unknown !== undefined) return err(unknown);
   return sameIdentity(parsed.value.header, identity)
-    ? ok({ records: parsed.value.records, usedPaths: parsed.value.usedPaths })
+    ? ok({
+        records: parsed.value.records,
+        usedPaths: parsed.value.usedPaths,
+        committedBytes: parsed.value.committedBytes,
+      })
     : err(
         decompileInputError(
           "output_directory",
@@ -468,11 +527,18 @@ const parseJournal = (
   OpenedJournal & { readonly header: DecompileJournalHeader },
   AnalysisError
 > => {
-  const lines = text.split("\n");
-  if (lines.at(-1) === "") lines.pop();
+  // Every committed line ends with a newline. Text after the last newline is
+  // an interrupted append and is not part of the journal.
+  const committedEnd = text.lastIndexOf("\n") + 1;
+  const committed = text.slice(0, committedEnd);
+  const lines = committed.split("\n");
+  lines.pop();
   const header = decompileJournalHeaderSchema.safeParse(parseJson(lines[0]));
   if (!header.success) return err(incompatibleJournal());
   const records = new Map<string, DecompileDirectoryFunctionRecord>();
+  // A path stays reserved by the first address that used it, even when that
+  // address's latest record no longer names it.
+  const pathOwners = new Map<string, string>();
   for (const line of lines.slice(1)) {
     const parsed = decompileJournalLineSchema.safeParse(parseJson(line));
     if (!parsed.success || parsed.data.kind !== "function")
@@ -481,15 +547,21 @@ const parseJournal = (
     const accepted = decompileDirectoryFunctionSchema.safeParse(record);
     if (!accepted.success || !validFunctionRecord(accepted.data))
       return err(incompatibleJournal());
+    const path = accepted.data.relative_path;
+    if (path !== undefined) {
+      const owner = pathOwners.get(path);
+      if (owner !== undefined && owner !== accepted.data.address)
+        return err(incompatibleJournal());
+      pathOwners.set(path, accepted.data.address);
+    }
     records.set(accepted.data.address, accepted.data);
   }
-  const usedPaths = new Set<string>();
-  for (const record of records.values()) {
-    if (record.relative_path === undefined) continue;
-    if (usedPaths.has(record.relative_path)) return err(incompatibleJournal());
-    usedPaths.add(record.relative_path);
-  }
-  return ok({ header: header.data, records, usedPaths });
+  return ok({
+    header: header.data,
+    records,
+    usedPaths: new Set(pathOwners.keys()),
+    committedBytes: Buffer.byteLength(committed, "utf8"),
+  });
 };
 
 const validFunctionRecord = (
@@ -503,6 +575,27 @@ const validFunctionRecord = (
   return record.status === "written"
     ? record.relative_path !== undefined && record.sha256 !== undefined
     : record.failure !== undefined;
+};
+
+/** Resume needs both identities known. Two unknown digests are not a match. */
+const unknownIdentity = (
+  header: DecompileJournalHeader,
+  identity: ExportIdentity,
+): AnalysisInputError | undefined => {
+  if (header.target_sha256 === null || identity.targetSha256 === null)
+    return decompileInputError(
+      "output_directory",
+      "Resume requires an observed target SHA-256 for both the journal and this target.",
+    );
+  if (
+    header.analysis_profile_digest === null ||
+    identity.analysisProfileDigest === null
+  )
+    return decompileInputError(
+      "output_directory",
+      "Resume requires an analysis profile digest for both the journal and this provider.",
+    );
+  return undefined;
 };
 
 const sameIdentity = (
@@ -569,6 +662,17 @@ const sanitizeAddress = (address: string): string => {
     .replace(/^\.+/u, "")
     .slice(0, 120);
   return cleaned.length === 0 ? "function" : cleaned;
+};
+
+const STALE_TEMPORARY =
+  /^(?:\.tmp-[0-9a-f]{16}\.c|\.decompile-index\.[0-9a-f]{16}\.tmp)$/u;
+
+/** Remove this export's own temporary files left by an interrupted run. */
+const removeStaleTemporaries = async (root: string): Promise<void> => {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries)
+    if (entry.isFile() && STALE_TEMPORARY.test(entry.name))
+      await unlink(join(root, entry.name)).catch(() => undefined);
 };
 
 const writeOwnedIndex = async (

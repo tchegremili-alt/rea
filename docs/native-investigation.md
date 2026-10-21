@@ -174,9 +174,12 @@ pseudocode. Each file records the provider name, canonical address, inclusive
 body ranges when `procedure_info` supplies them, and that observation's
 limitations. A fresh output directory must not already exist. `--resume`
 continues an export for the same target SHA-256, provider, analysis profile,
-and layout, skips files whose bytes still match the journal, and never
-overwrites a conflicting file. One function's decompiler error, deadline, or
-unresolved identity is counted and does not stop the others. `--layout dwarf`
+and layout; an export without a known target or profile digest cannot be
+resumed. Resume skips files whose bytes still match the journal, tries
+functions it has not attempted before retrying recorded failures, ignores a
+journal line torn by an interrupted write, and never overwrites a conflicting
+file. One function's decompiler error or deadline is counted and does not stop
+the others. Inventory rows without an address are counted in the limitations. `--layout dwarf`
 reports that compilation-unit paths are unavailable and still names files by
 address. Filters are a case-sensitive name substring, a case-sensitive name
 prefix, an inclusive address range, and a count limit. Cancellation leaves
