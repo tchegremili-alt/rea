@@ -1,6 +1,7 @@
 import { once } from "node:events";
 import { describe, expect, it, vi } from "vitest";
 
+import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 import type { WindowsNativeAuthority } from "./WindowsNativeLoader.js";
 import {
   quoteWindowsProcessArgument,
@@ -183,6 +184,22 @@ describe("Windows Job Object memory limits", () => {
       "does not support Job Object memory limits",
     );
     expect(calls).toEqual([]);
+  });
+
+  it("types a missing control as capability_unavailable, not an execution failure (#6050)", () => {
+    const { native } = authority();
+    let thrown: unknown;
+    try {
+      launch(native, LIMIT);
+    } catch (cause) {
+      thrown = cause;
+    }
+    expect(thrown).toBeInstanceOf(AnalysisCapabilityUnavailableError);
+    const error = thrown as AnalysisCapabilityUnavailableError;
+    expect(error.providerId).toBe("windows-native-authority");
+    expect(error.operation).toBe("launch_owned_process");
+    expect(error.userMessage).toContain("Job Object memory limits");
+    expect(error.remediationAction).toContain("Windows x64 rea-agents package");
   });
 
   it("keeps the unlimited launch shape and rejects limit fields it did not request", async () => {

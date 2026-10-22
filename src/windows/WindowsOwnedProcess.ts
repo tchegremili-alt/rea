@@ -3,6 +3,7 @@ import { PassThrough, Writable } from "node:stream";
 
 import { z } from "zod";
 
+import { AnalysisCapabilityUnavailableError } from "../domain/analysisErrorCore.js";
 import type { ProcessCleanupResult } from "../process/ProcessOwnership.js";
 import {
   requireWindowsNativeAuthority,
@@ -32,6 +33,19 @@ const limitedPollSchema = pollSchema.extend({
 });
 
 /** Optional native job controls for one owned Windows process tree. */
+/** Typed refusal for a Windows native artifact that lacks a requested control. */
+const missingControl = (reason: string): AnalysisCapabilityUnavailableError =>
+  new AnalysisCapabilityUnavailableError(
+    "windows-native-authority",
+    "launch_owned_process",
+    reason,
+    {
+      userMessage: reason,
+      remediationAction:
+        "Install the matching current Windows x64 rea-agents package so native/windows/build carries the requested process controls.",
+    },
+  );
+
 export interface WindowsOwnedProcessOptions {
   /** Open a writable protocol pipe; otherwise stdin is NUL. */
   readonly protocolStdin?: boolean;
@@ -88,8 +102,10 @@ export class WindowsOwnedProcess extends EventEmitter {
     const protocolStdin = options.protocolStdin === true;
     this.#memoryLimitBytes = options.memoryLimitBytes;
     this.#authority = options.authority ?? requireWindowsNativeAuthority();
+    // A missing control is a host capability gap, not an execution failure
+    // (#6050): the typed refusal reaches CLI and MCP as capability_unavailable.
     if (protocolStdin && this.#authority.inspection.protocolStdin !== true)
-      throw new Error(
+      throw missingControl(
         "The bundled Windows native artifact does not support owned protocol stdin; use a matching current Windows x64 REA package.",
       );
     // A requested limit is never dropped: an artifact without the control
@@ -98,7 +114,7 @@ export class WindowsOwnedProcess extends EventEmitter {
       this.#memoryLimitBytes !== undefined &&
       this.#authority.inspection.jobMemoryLimit !== true
     )
-      throw new Error(
+      throw missingControl(
         "The bundled Windows native artifact does not support Job Object memory limits; use a matching current Windows x64 REA package.",
       );
     const entries = Object.entries(environment)
