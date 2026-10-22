@@ -33,9 +33,10 @@ export const nativeLoadImageObservationSchema = z.strictObject({
       initialized: z.boolean(),
       loaded: z.boolean(),
       overlay: z.boolean(),
-      readable: z.boolean(),
-      writable: z.boolean(),
-      executable: z.boolean(),
+      // Optional so inspection snapshots saved before permissions were measured still parse.
+      readable: z.boolean().optional(),
+      writable: z.boolean().optional(),
+      executable: z.boolean().optional(),
       length: integer.min(1),
       source_file_index: integer.nullable(),
       file_offset: integer.nullable(),

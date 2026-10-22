@@ -50,9 +50,9 @@ type FileFacts = {
   readonly loaded: boolean;
   readonly overlay: boolean;
   readonly address_space: string;
-  readonly readable: boolean;
-  readonly writable: boolean;
-  readonly executable: boolean;
+  readonly readable?: boolean | undefined;
+  readonly writable?: boolean | undefined;
+  readonly executable?: boolean | undefined;
 };
 type BssFacts = Omit<FileFacts, "file_offset" | "sha256" | "source_file_index">;
 const hex = (value: number): string => `0x${value.toString(16)}`;
@@ -126,9 +126,9 @@ export const attestGhidraDolLoadImage = (
     loaded: mapping.loaded,
     overlay: mapping.overlay,
     address_space: mapping.address_space,
-    readable: mapping.readable,
-    writable: mapping.writable,
-    executable: mapping.executable,
+    readable: mapping.readable ?? null,
+    writable: mapping.writable ?? null,
+    executable: mapping.executable ?? null,
   });
   const bssFacts = (mapping: BssFacts) => ({
     start: mapping.start,
@@ -138,9 +138,9 @@ export const attestGhidraDolLoadImage = (
     loaded: mapping.loaded,
     overlay: mapping.overlay,
     address_space: mapping.address_space,
-    readable: mapping.readable,
-    writable: mapping.writable,
-    executable: mapping.executable,
+    readable: mapping.readable ?? null,
+    writable: mapping.writable ?? null,
+    executable: mapping.executable ?? null,
   });
 
   const expectedFileMappings = header.sections
@@ -199,6 +199,17 @@ export const attestGhidraDolLoadImage = (
   const observedBss = observedBssBlocks
     .map((mapping) => bssFacts(mapping))
     .sort(byStart);
+  // Permissions are attested only when measured; an older observation without them fails closed.
+  const unmeasured = observations.mappings
+    .filter(
+      (mapping) =>
+        (mapping.source_file_index !== null ||
+          observedBssBlocks.includes(mapping)) &&
+        (mapping.readable === undefined ||
+          mapping.writable === undefined ||
+          mapping.executable === undefined),
+    )
+    .map((mapping) => mapping.block);
 
   const source = observations.source_files[0];
   check("executable_format", "Raw Binary", observations.executable_format);
@@ -253,6 +264,8 @@ export const attestGhidraDolLoadImage = (
       (entry) => entry === hex(header.entryPoint),
     ) ?? null,
   );
+  if (unmeasured.length > 0)
+    check("block_permissions_measured", [], unmeasured);
   check("relocation_records", [], observations.relocations);
   return ok(
     nativeLoadImageSchema.parse({
