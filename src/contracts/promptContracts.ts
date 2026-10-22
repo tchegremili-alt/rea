@@ -317,6 +317,70 @@ export const PROMPT_CONTRACTS = [
     ],
   },
   {
+    name: "review_native_vulnerabilities",
+    title: "Review native vulnerabilities",
+    description:
+      "Guide a defensive static review of a native binary while separating observed paths, inferred input control, mitigations, and unknowns.",
+    objective:
+      "For each candidate defect, distinguish a statically observed path cited by Evidence, input controllability labeled as an Inference with confidence, and Unknown when no static path is found or indirect calls remain unresolved. Label CWE class and severity as Inferences, and keep the review defensive and remediation-oriented.",
+    arguments: {
+      review_focus: required(
+        "Input parser, entry point, or sink class to review",
+      ),
+      target_path: optional(
+        "Absolute target path; omit when the intended target is already open",
+      ),
+      procedure: optional(
+        "Known procedure, parser, or entry-point name or address",
+        "procedure",
+      ),
+      provider_id: optional(
+        "Provider to use; omit to keep the current provider selection",
+        "provider",
+      ),
+    },
+    steps: [
+      {
+        tools: ["open_binary"],
+        instruction:
+          "Use the requested target and open it only when needed for static analysis. This workflow does not execute the target.",
+      },
+      {
+        tools: [
+          "inspect_binary_layout",
+          "inspect_analysis_view",
+          "inspect_signature",
+        ],
+        instruction:
+          'Collect static mitigation facts such as canaries, NX, ASLR, and RELRO. Request inspect_binary_layout with detail: "summary" so complete Evidence is retained while only its summary is returned. For mitigation facts, pass normalized_result.parent_evidence_id to inspect_analysis_view with view: {kind: "facet", facet: "mitigations"}; do not request complete layout solely for mitigations. Use inspect_signature only for relevant signature evidence. Report only static inferences; unavailable facts remain Unknown, and mitigations do not prove protection or its absence.',
+      },
+      {
+        tools: ["search_procedures", "find_xrefs_to_name", "list_names"],
+        instruction:
+          "Start with targeted search_procedures queries for the requested focus or common sink names, and find_xrefs_to_name when an exact relevant symbol is known. Use list_names only as a fallback when targeted searches do not produce a useful seed; avoid carrying the complete symbol inventory unnecessarily. When procedure is omitted, select an entry point only when Evidence supports it; otherwise keep the entry point Unknown. Common sink starting points include strcpy, strcat, sprintf, gets, memcpy, alloca, system, popen, and exec-family names; this list is not exhaustive or a code catalog.",
+      },
+      {
+        tools: ["analyze_function", "trace_native_values"],
+        instruction:
+          "Build function context. Select an Evidence-supported input/entry procedure relevant to the requested parser as the primary seed; run trace_native_values once and reuse its graph for every candidate sink it covers. Add at most one second seed only for a separately important input path the first graph does not cover; leave other source paths Unknown rather than tracing every source. Inspect truncation, Unknowns, and unresolved bindings. Default depth, function, call-site, node, and edge budgets bound each trace; this data-dependency triage cannot prove exhaustive control-flow reachability. Cite returned Evidence for observed relationships.",
+      },
+      {
+        tools: [
+          "trace_call_path",
+          "build_call_path",
+          "resolve_native_call_targets",
+        ],
+        instruction:
+          "Prefer existing Evidence. Do not use trace_call_path for broad route discovery or to prove a missing route: it has no traversal budget, and a miss can exhaust the reachable graph. Only use it with a specific start and goal when prior Evidence supports a likely short route through a narrow relevant call graph; always pass goal. Use build_call_path only for a specific start/goal and a small, low-branching set of complete analyze_function Evidence because it returns every shortest path inline; skip it when graph scope or path count is uncertain. Resolve native call targets only for an unresolved indirect call relevant to the candidate. Unresolved indirect calls and incomplete coverage remain Unknown; no path found is not proof of unreachability.",
+      },
+      {
+        tools: ["record_unknown"],
+        instruction:
+          "Track unresolved reachability, input controllability, or mitigation facts as Unknowns rather than filling gaps with assumptions. Tools can record Evidence and Unknowns in the REA session but do not modify the target. Keep findings defensive and remediation-oriented; exclude exploit instructions, payloads, shellcode, ROP or JOP chains, heap-grooming recipes, and mitigation-bypass techniques. A trigger condition or precondition is enough.",
+      },
+    ],
+  },
+  {
     name: "audit_residual_unknowns",
     title: "Audit residual unknowns",
     description:

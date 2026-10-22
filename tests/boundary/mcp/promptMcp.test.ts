@@ -37,6 +37,7 @@ import {
 } from "../../fixtures/binarySession.js";
 import type { BinarySession } from "../../../src/application/binary/BinarySession.js";
 import { PROMPT_CONTRACTS } from "../../../src/contracts/promptContracts.js";
+import { TOOL_EFFECTS } from "../../../src/contracts/toolEffects.js";
 import { createEvidence } from "../../../src/domain/evidence.js";
 import { createServer } from "../../../src/server/createServer.js";
 import { registerGuidedPrompts } from "../../../src/server/registerPrompts.js";
@@ -191,6 +192,104 @@ describe("guided prompts over MCP", () => {
     ).toEqual({
       completion: { values: [], total: 0, hasMore: false },
     });
+    expect(executions).toBe(0);
+  });
+});
+
+describe("native vulnerability MCP prompt", () => {
+  it("renders defensive guidance with static target-safe tools", async () => {
+    let executions = 0;
+    const session = fixtureSession(() => {
+      executions += 1;
+    });
+    const client = await connect(createServer({ kind: "session", session }));
+    resources.push(session);
+
+    const contract = PROMPT_CONTRACTS.find(
+      ({ name }) => name === "review_native_vulnerabilities",
+    );
+    if (contract === undefined)
+      throw new Error("Missing review_native_vulnerabilities prompt contract");
+    const argumentShape = Object.fromEntries(
+      Object.entries(contract.arguments).map(([name, argument]) => [
+        name,
+        {
+          required: argument.required,
+          ...(argument.completion === undefined
+            ? {}
+            : { completion: argument.completion }),
+        },
+      ]),
+    );
+    expect(argumentShape).toEqual({
+      review_focus: { required: true },
+      target_path: { required: false },
+      procedure: { required: false, completion: "procedure" },
+      provider_id: { required: false, completion: "provider" },
+    });
+    const result = await client.getPrompt({
+      name: contract.name,
+      arguments: { review_focus: "input parser" },
+    });
+    const content = result.messages[0]?.content;
+    expect(content?.type).toBe("text");
+    if (content?.type !== "text") throw new Error("missing prompt text");
+
+    for (const requiredGuidance of [
+      "statically observed path",
+      "input controllability labeled as an Inference with confidence",
+      "Unknown when no static path is found or indirect calls remain unresolved",
+      "CWE class and severity as Inferences",
+      "canaries, NX, ASLR, and RELRO",
+      "do not prove protection or its absence",
+      "unavailable facts remain Unknown",
+      'detail: "summary"',
+      "normalized_result.parent_evidence_id",
+      'view: {kind: "facet", facet: "mitigations"}',
+      "Start with targeted search_procedures queries",
+      "Use list_names only as a fallback",
+      "When procedure is omitted, select an entry point only when Evidence supports it; otherwise keep the entry point Unknown.",
+      "no path found is not proof of unreachability",
+      "remediation-oriented",
+      "does not execute the target",
+      "exclude exploit instructions",
+      "shellcode",
+      "ROP or JOP chains",
+      "heap-grooming recipes",
+      "mitigation-bypass techniques",
+      "trigger condition or precondition is enough",
+      "do not modify the target",
+      "Evidence discipline",
+      "Observations",
+      "Inference",
+      "Unknowns",
+    ])
+      expect(content.text).toContain(requiredGuidance);
+
+    const suggestedTools = [
+      ...new Set(contract.steps.flatMap(({ tools }) => tools)),
+    ];
+    expect(suggestedTools).toEqual([
+      "open_binary",
+      "inspect_binary_layout",
+      "inspect_analysis_view",
+      "inspect_signature",
+      "search_procedures",
+      "find_xrefs_to_name",
+      "list_names",
+      "analyze_function",
+      "trace_native_values",
+      "trace_call_path",
+      "build_call_path",
+      "resolve_native_call_targets",
+      "record_unknown",
+    ]);
+    for (const tool of suggestedTools)
+      expect(TOOL_EFFECTS[tool]).toMatchObject({
+        mutatesTarget: false,
+        executesForeignCode: false,
+        mutatesDevice: false,
+      });
     expect(executions).toBe(0);
   });
 });
@@ -780,6 +879,7 @@ const MINIMUM_PROMPT_ARGUMENTS: Readonly<
   },
   verify_reconstruction: { reconstruction_goal: "preserve search results" },
   trace_crash: { crash_signal: "SIGSEGV at 0x1000" },
+  review_native_vulnerabilities: { review_focus: "input parser" },
   audit_residual_unknowns: { audit_scope: "release decision" },
   prepare_bounded_process_capture: {
     behavior_question: "Does the process write a cache file?",
