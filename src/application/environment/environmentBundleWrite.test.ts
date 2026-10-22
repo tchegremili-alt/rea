@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { expect, it, vi } from "vitest";
 
+import { writeDenialEnforced } from "../../../tests/fixtures/permissionDenial.js";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 import {
   environmentServeSource,
@@ -167,7 +168,7 @@ it("uses confirmed publication after the output owner's descriptor cleanup compl
   }
 });
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+it.skipIf(process.platform === "win32" || !writeDenialEnforced)(
   "returns a tagged permission refusal for an existing read-only empty directory",
   async () => {
     const root = await createTestTempDirectory("rea-bundle-readonly-");
@@ -200,7 +201,7 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   },
 );
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+it.skipIf(process.platform === "win32" || !writeDenialEnforced)(
   "names the nested path when write permission is lost after earlier files",
   async () => {
     const root = await createTestTempDirectory("rea-bundle-later-denied-");

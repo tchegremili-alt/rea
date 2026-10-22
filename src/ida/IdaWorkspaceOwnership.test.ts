@@ -5,6 +5,7 @@ import {
   createIdaTarget,
   RecordingIdaMcp,
 } from "../../tests/fixtures/idaMcp.js";
+import { writeDenialEnforced } from "../../tests/fixtures/permissionDenial.js";
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import { IdaSessionClient } from "./IdaSessionClient.js";
@@ -70,7 +71,7 @@ describe("IDA workspace ownership before input preparation", () => {
     expect(await readdir(root)).toEqual([]);
   });
 
-  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+  it.skipIf(process.platform === "win32" || !writeDenialEnforced)(
     "preserves the input identity failure and retries workspace removal after permission recovery",
     async () => {
       const { root, target } = await createIdaTarget();

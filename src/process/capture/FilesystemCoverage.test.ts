@@ -9,6 +9,7 @@ import {
 import { join } from "node:path";
 import { expect, it } from "vitest";
 import { parseProcessScenario } from "../../domain/process/processScenario.js";
+import { readDenialEnforced } from "../../../tests/fixtures/permissionDenial.js";
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 import { snapshotRoots } from "./FilesystemSnapshot.js";
 import { classifyFilesystemEffects } from "./ProcessFilesystemEffects.js";
@@ -100,7 +101,7 @@ it("distinguishes unavailable content hashes from completed path enumeration", a
   ).toMatchObject({ status: "deleted", before: { sha256: null }, after: null });
 });
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+it.skipIf(process.platform === "win32" || !readDenialEnforced)(
   "retains readable entries and marks an unreadable directory subtree unknown",
   async () => {
     const root = await createTestTempDirectory("rea-fs-unreadable-directory-");
@@ -139,7 +140,7 @@ it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
   },
 );
 
-it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+it.skipIf(process.platform === "win32" || !readDenialEnforced)(
   "retains unreadable-file and sibling observations in a complete snapshot",
   async () => {
     const root = await createTestTempDirectory("rea-fs-unreadable-file-");
