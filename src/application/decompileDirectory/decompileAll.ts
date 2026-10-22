@@ -147,9 +147,14 @@ export const decompileAll = async (
   } finally {
     closed = await session.close();
   }
+  // A publish, index or close failure stays primary: the journal or index
+  // may be incomplete and the caller needs that reason.
   if (!published.ok) return published;
   if (!indexed.ok) return indexed;
   if (!closed.ok) return closed;
+  // Finalization succeeded, so committed files and the index are usable on
+  // resume, but a caller abort that arrived meanwhile is not a success.
+  if (isAborted(signal)) return err(cancelled(signal));
   const manifest = decompileDirectoryManifestSchema.safeParse(
     manifestOf({
       root: session.root,
@@ -291,6 +296,16 @@ const publishSelected = async (input: {
     const existing = await existingFile(input.session, procedure.address);
     if (existing === "skip") {
       input.state.skipped += 1;
+      // The file verified again after a later failure, so the journal and
+      // index report it as written instead of keeping the stale failure.
+      const written = input.session.lastWritten(procedure.address);
+      if (
+        written !== undefined &&
+        input.session.record(procedure.address) !== written
+      ) {
+        const appended = await input.session.append(written);
+        if (!appended.ok) return appended;
+      }
       continue;
     }
     if (input.limit !== undefined && input.state.attempted >= input.limit)
@@ -308,7 +323,7 @@ const publishSelected = async (input: {
           procedure,
           retainedBody(input.session, procedure.address),
           reason,
-          input.session.pathFor(procedure.address),
+          { relativePath: input.session.pathFor(procedure.address) },
         ),
       );
       if (!appended.ok) return appended;
@@ -325,7 +340,7 @@ const publishSelected = async (input: {
           procedure,
           retainedBody(input.session, procedure.address),
           reason,
-          input.session.pathFor(procedure.address),
+          { relativePath: input.session.pathFor(procedure.address) },
         ),
       );
       if (!appended.ok) return appended;
@@ -364,6 +379,10 @@ const publishOne = async (input: {
   if (body.kind === "cancelled")
     return { result: err(body.error), bodySupport: input.bodySupport };
   if (body.kind === "unavailable") input.state.bodyUnavailable = true;
+  // Caveats of the observations this attempt used. A written file keeps them
+  // in its header and a failure record keeps them in the journal, so the
+  // bounded Evidence summary never holds the only copy.
+  const infoCaveats = body.kind === "body" ? (body.limitations ?? []) : [];
   const decompiled = await input.analysis.execute(
     "procedure_pseudo_code",
     { procedure: input.procedure.address },
@@ -378,7 +397,9 @@ const publishOne = async (input: {
     recordFailure(input.state, input.procedure, reason);
     return {
       result: await input.session.append(
-        failureRecord(input.procedure, body.fact, reason),
+        failureRecord(input.procedure, body.fact, reason, {
+          limitations: infoCaveats,
+        }),
       ),
       bodySupport: body.support,
     };
@@ -389,11 +410,16 @@ const publishOne = async (input: {
     recordFailure(input.state, input.procedure, reason);
     return {
       result: await input.session.append(
-        failureRecord(input.procedure, body.fact, reason),
+        failureRecord(input.procedure, body.fact, reason, {
+          limitations: infoCaveats,
+        }),
       ),
       bodySupport: body.support,
     };
   }
+  const caveats = [
+    ...new Set([...infoCaveats, ...decompiled.value.limitations]),
+  ];
   const pseudocode = decompiled.value.result;
   if (typeof pseudocode !== "string" || pseudocode.length === 0) {
     const reason = {
@@ -409,7 +435,9 @@ const publishOne = async (input: {
     recordFailure(input.state, input.procedure, reason);
     return {
       result: await input.session.append(
-        failureRecord(input.procedure, body.fact, reason),
+        failureRecord(input.procedure, body.fact, reason, {
+          limitations: caveats,
+        }),
       ),
       bodySupport: body.support,
     };
@@ -420,7 +448,7 @@ const publishOne = async (input: {
       procedure: input.procedure,
       body: body.fact,
       identity: input.identity,
-      limitations: decompiled.value.limitations,
+      limitations: caveats,
       pseudocode,
     }),
     "utf8",
@@ -445,7 +473,10 @@ const publishOne = async (input: {
     recordFailure(input.state, input.procedure, reason);
     return {
       result: await input.session.append(
-        failureRecord(input.procedure, body.fact, reason, relativePath),
+        failureRecord(input.procedure, body.fact, reason, {
+          relativePath,
+          limitations: caveats,
+        }),
       ),
       bodySupport: body.support,
     };
@@ -475,6 +506,12 @@ const readBody = async (
       readonly kind: "body";
       readonly fact: FunctionBody;
       readonly support: "unknown" | "unavailable";
+      /**
+       * Caveats of a procedure_info observation for this export's target and
+       * profile. An observation for another target or profile is foreign and
+       * contributes none.
+       */
+      readonly limitations?: readonly string[];
     }
   | {
       readonly kind: "unavailable";
@@ -522,6 +559,7 @@ const readBody = async (
       kind: "body",
       fact: unavailableBody("procedure_info returned an invalid body."),
       support,
+      limitations: observed.value.limitations,
     };
   if (!sameAddress(parsed.data.entrypoint, address))
     return {
@@ -530,12 +568,14 @@ const readBody = async (
         "procedure_info described a different entry point than this function.",
       ),
       support,
+      limitations: observed.value.limitations,
     };
   if (!parsed.data.body.available)
     return {
       kind: "body",
       fact: unavailableBody(parsed.data.body.reason),
       support,
+      limitations: observed.value.limitations,
     };
   return {
     kind: "body",
@@ -545,6 +585,7 @@ const readBody = async (
       non_contiguous: parsed.data.body.non_contiguous,
     },
     support,
+    limitations: observed.value.limitations,
   };
 };
 
@@ -554,10 +595,9 @@ const existingFile = async (
   session: DecompileExport,
   address: string,
 ): Promise<ExistingFile> => {
-  const record = session.record(address);
+  const record = session.lastWritten(address);
   if (
     record === undefined ||
-    record.status !== "written" ||
     record.sha256 === undefined ||
     record.relative_path === undefined
   )
@@ -646,14 +686,23 @@ const failureRecord = (
   procedure: SelectedProcedure,
   body: FunctionBody,
   reason: FailureReason,
-  relativePath?: string,
+  options: {
+    readonly relativePath?: string;
+    /** Caveats of the observations this attempt used. */
+    readonly limitations?: readonly string[];
+  } = {},
 ): DecompileDirectoryFunctionRecord => ({
   address: procedure.address,
   name: procedure.name,
   status: "failed",
   body: bodyRecord(body),
   failure: reason,
-  ...(relativePath === undefined ? {} : { relative_path: relativePath }),
+  ...(options.relativePath === undefined
+    ? {}
+    : { relative_path: options.relativePath }),
+  ...(options.limitations === undefined || options.limitations.length === 0
+    ? {}
+    : { limitations: [...options.limitations] }),
 });
 
 const unavailableBody = (reason: string): FunctionBody => ({

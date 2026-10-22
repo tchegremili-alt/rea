@@ -24,11 +24,42 @@ import type { JsonValue } from "../domain/jsonValue.js";
 import type { UnknownRegistryPort } from "./investigation/InvestigationRecordPort.js";
 import { UnknownRegistryError } from "../domain/unknownRegistryError.js";
 import { workflowUnknownInput } from "./investigation/WorkflowUnknown.js";
+import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 import {
   renderSourceLimitations,
   sourceLimitationKey,
   type SourceLimitation,
 } from "./SourceLimitations.js";
+
+/**
+ * Bound for caveats a workflow observes once per item. Provider caveats can
+ * name per-item addresses, so they do not deduplicate and would otherwise grow
+ * with the number of items.
+ */
+export interface ComposedLimitationBudget {
+  /** Operations the workflow calls once per item. */
+  readonly perItemOperations: ReadonlySet<AnalysisOperation>;
+  /**
+   * Distinct per-item caveats kept: the most often observed, ties broken by
+   * provider and text. Kept lines are then rendered in the usual sorted order.
+   */
+  readonly maxDistinct: number;
+  /** Where the omitted per-item caveats remain, as a clause. */
+  readonly retainedIn: string;
+}
+
+const DECOMPILE_ALL_LIMITATIONS: ComposedLimitationBudget = {
+  perItemOperations: new Set(["procedure_info", "procedure_pseudo_code"]),
+  maxDistinct: 8,
+  retainedIn:
+    "each function's file header or index failure record keeps the caveats of the observations it used",
+};
+
+/** The caveat budget for a composed workflow, when it has one. */
+export const composedLimitationBudget = (
+  operation: string,
+): ComposedLimitationBudget | undefined =>
+  operation === "decompile_all" ? DECOMPILE_ALL_LIMITATIONS : undefined;
 
 /** Retain the limits of exactly the observations used by one composed call. */
 export const executeComposedWorkflow = async (
@@ -36,6 +67,7 @@ export const executeComposedWorkflow = async (
   execute: (
     observed: AnalysisOperationPort,
   ) => Promise<Result<JsonValue, AnalysisError>>,
+  budget?: ComposedLimitationBudget,
 ): Promise<
   Result<
     {
@@ -46,7 +78,10 @@ export const executeComposedWorkflow = async (
     AnalysisError
   >
 > => {
-  const limitations = new Map<string, SourceLimitation>();
+  const limitations = new Map<
+    string,
+    { readonly fact: SourceLimitation; observations: number }
+  >();
   let cachePolicy: "live" | undefined;
   const result = await execute({
     execute: async (operation, parameters, options) => {
@@ -60,7 +95,11 @@ export const executeComposedWorkflow = async (
             operation,
             limitation,
           } satisfies SourceLimitation;
-          limitations.set(sourceLimitationKey(fact), fact);
+          const key = sourceLimitationKey(fact);
+          const seen = limitations.get(key);
+          if (seen === undefined)
+            limitations.set(key, { fact, observations: 1 });
+          else seen.observations += 1;
         }
       return execution;
     },
@@ -68,9 +107,58 @@ export const executeComposedWorkflow = async (
   if (!result.ok) return result;
   return ok({
     result: result.value,
-    limitations: renderSourceLimitations([...limitations.values()]),
+    limitations: boundedLimitations([...limitations.values()], budget),
     ...(cachePolicy === undefined ? {} : { cachePolicy }),
   });
+};
+
+const boundedLimitations = (
+  observed: readonly {
+    readonly fact: SourceLimitation;
+    readonly observations: number;
+  }[],
+  budget: ComposedLimitationBudget | undefined,
+): string[] => {
+  if (budget === undefined)
+    return renderSourceLimitations(observed.map(({ fact }) => fact));
+  // Group per-item caveats exactly as rendering merges them, by provider and
+  // text, so the kept and omitted counts describe rendered lines.
+  const groups = new Map<
+    string,
+    { facts: SourceLimitation[]; observations: number }
+  >();
+  for (const { fact, observations } of observed) {
+    if (!budget.perItemOperations.has(fact.operation)) continue;
+    const key = JSON.stringify([
+      fact.provider.id,
+      fact.provider.name,
+      fact.provider.version,
+      fact.limitation,
+    ]);
+    const group = groups.get(key) ?? { facts: [], observations: 0 };
+    group.facts.push(fact);
+    group.observations += observations;
+    groups.set(key, group);
+  }
+  const ranked = [...groups.entries()].sort(
+    ([leftKey, left], [rightKey, right]) =>
+      right.observations - left.observations ||
+      compareUnicodeCodePoints(leftKey, rightKey),
+  );
+  const kept = ranked.slice(0, budget.maxDistinct);
+  const omitted = ranked.length - kept.length;
+  const rendered = renderSourceLimitations([
+    ...observed
+      .filter(({ fact }) => !budget.perItemOperations.has(fact.operation))
+      .map(({ fact }) => fact),
+    ...kept.flatMap(([, group]) => group.facts),
+  ]);
+  return omitted === 0
+    ? rendered
+    : [
+        ...rendered,
+        `${omitted} further distinct per-item provider limitation${omitted === 1 ? " was" : "s were"} omitted from this answer; ${budget.retainedIn}.`,
+      ];
 };
 
 /** Build the shared Evidence record for a successful composed binary workflow. */

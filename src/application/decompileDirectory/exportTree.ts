@@ -100,6 +100,7 @@ export class DecompileExport {
     readonly root: string,
     private readonly journal: FileHandle,
     private readonly records: Map<string, DecompileDirectoryFunctionRecord>,
+    private readonly written: Map<string, DecompileDirectoryFunctionRecord>,
     private readonly paths: PathReservations,
     private readonly identity: ExportIdentity,
   ) {}
@@ -113,8 +114,17 @@ export class DecompileExport {
       : DecompileExport.#resume(input.placement.root, input.identity);
   }
 
+  /** The latest journal outcome for an address. */
   record(address: string): DecompileDirectoryFunctionRecord | undefined {
     return this.records.get(address);
+  }
+
+  /**
+   * The last successful write for an address. A later failure, such as a
+   * transient read error, does not erase the checksum that verifies the file.
+   */
+  lastWritten(address: string): DecompileDirectoryFunctionRecord | undefined {
+    return this.written.get(address);
   }
 
   /**
@@ -158,6 +168,7 @@ export class DecompileExport {
         ),
       );
     this.records.set(record.address, record);
+    if (record.status === "written") this.written.set(record.address, record);
     if (record.relative_path !== undefined)
       reservePath(this.paths, record.relative_path, record.address);
     return ok(undefined);
@@ -234,6 +245,7 @@ export class DecompileExport {
         root,
         opened.value,
         new Map(),
+        new Map(),
         { byPath: new Map(), byAddress: new Map() },
         identity,
       ),
@@ -272,6 +284,7 @@ export class DecompileExport {
         root,
         handle.value,
         opened.value.records,
+        opened.value.written,
         opened.value.paths,
         identity,
       ),
@@ -495,6 +508,7 @@ const openJournal = async (
 
 interface OpenedJournal {
   readonly records: Map<string, DecompileDirectoryFunctionRecord>;
+  readonly written: Map<string, DecompileDirectoryFunctionRecord>;
   readonly paths: PathReservations;
   /** Byte length of the newline-terminated lines. */
   readonly committedBytes: number;
@@ -527,7 +541,7 @@ const readJournal = async (
       nodeCode(bytes) === "ENOENT"
         ? decompileInputError(
             "output_directory",
-            "Resume requires decompile-journal.jsonl in the output directory.",
+            "Resume requires decompile-journal.jsonl in the output directory. An export stopped before its journal was written has no functions to keep; choose a new output directory, or remove this one if it is yours.",
           )
         : decompileInputError(
             "output_directory",
@@ -541,6 +555,7 @@ const readJournal = async (
   return sameIdentity(parsed.value.header, identity)
     ? ok({
         records: parsed.value.records,
+        written: parsed.value.written,
         paths: parsed.value.paths,
         committedBytes: parsed.value.committedBytes,
         journalBytes: parsed.value.journalBytes,
@@ -568,6 +583,7 @@ const parseJournal = (
   const header = decompileJournalHeaderSchema.safeParse(parseJson(lines[0]));
   if (!header.success) return err(incompatibleJournal());
   const records = new Map<string, DecompileDirectoryFunctionRecord>();
+  const written = new Map<string, DecompileDirectoryFunctionRecord>();
   // A path stays reserved by the first address that used it, even when that
   // address's latest record no longer names it.
   const paths: PathReservations = { byPath: new Map(), byAddress: new Map() };
@@ -587,10 +603,13 @@ const parseJournal = (
       reservePath(paths, path, accepted.data.address);
     }
     records.set(accepted.data.address, accepted.data);
+    if (accepted.data.status === "written")
+      written.set(accepted.data.address, accepted.data);
   }
   return ok({
     header: header.data,
     records,
+    written,
     paths,
     committedBytes,
     journalBytes: bytes.length,
@@ -605,8 +624,11 @@ const validFunctionRecord = (
     !isDecompileFunctionRelativePath(record.relative_path)
   )
     return false;
+  // A written file's header holds its caveats; only failures carry them here.
   return record.status === "written"
-    ? record.relative_path !== undefined && record.sha256 !== undefined
+    ? record.relative_path !== undefined &&
+        record.sha256 !== undefined &&
+        record.limitations === undefined
     : record.failure !== undefined;
 };
 
@@ -669,6 +691,9 @@ const omitEmpty = (
     : { relative_path: record.relative_path }),
   ...(record.sha256 === undefined ? {} : { sha256: record.sha256 }),
   ...(record.failure === undefined ? {} : { failure: record.failure }),
+  ...(record.limitations === undefined
+    ? {}
+    : { limitations: record.limitations }),
 });
 
 /** Function file paths: each path has one owning address, each address keeps its first path. */

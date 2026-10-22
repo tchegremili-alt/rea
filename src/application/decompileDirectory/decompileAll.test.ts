@@ -1,6 +1,6 @@
-import { readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createTestTempDirectory } from "../../../tests/fixtures/temporaryDirectory.js";
 
@@ -10,7 +10,12 @@ import {
   type AnalysisOperationPort,
 } from "../AnalysisProvider.js";
 import { EnhancedTools } from "../EnhancedTools.js";
-import { createWorkflowEvidence } from "../WorkflowEvidence.js";
+import { DecompileExport } from "./exportTree.js";
+import {
+  composedLimitationBudget,
+  createWorkflowEvidence,
+  executeComposedWorkflow,
+} from "../WorkflowEvidence.js";
 import { toolContract } from "../../contracts/toolContracts.js";
 import {
   DECOMPILE_DIRECTORY_INDEX_NAME,
@@ -23,6 +28,7 @@ import {
   AnalysisCancelledError,
   AnalysisCapabilityUnavailableError,
   AnalysisInputError,
+  AnalysisOutputError,
   AnalysisTimeoutError,
 } from "../../domain/analysisErrorCore.js";
 import type { JsonValue } from "../../domain/jsonValue.js";
@@ -101,6 +107,8 @@ const harness = (options?: {
   readonly mismatch?: string;
   readonly unprofiled?: string;
   readonly foreignTarget?: string;
+  /** Per-address caveats, as Ghidra reports terminal calls. */
+  readonly addressCaveats?: boolean;
 }) => {
   const procedures = options?.procedures ?? [
     { address: "0x3000", name: "Bar::late" },
@@ -149,6 +157,9 @@ const harness = (options?: {
           ok(
             createAnalysisExecution(infoFor(address), provider, {
               analysisProfile: profile,
+              ...(options?.addressCaveats === true
+                ? { limitations: [`info caveat at ${address}`] }
+                : {}),
             }),
           ),
         );
@@ -186,7 +197,12 @@ const harness = (options?: {
               ...(options?.foreignTarget === address
                 ? { subject: { ...subject, sha256: "cd".repeat(32) } }
                 : {}),
-              limitations: ["terminal call may cut the body"],
+              limitations: [
+                "terminal call may cut the body",
+                ...(options?.addressCaveats === true
+                  ? [`terminal call at ${address}`]
+                  : []),
+              ],
             }),
           ),
         );
@@ -194,7 +210,7 @@ const harness = (options?: {
       return Promise.resolve(err(new AnalysisInputError(operation)));
     },
   };
-  return { calls, tools: new EnhancedTools(port), procedures };
+  return { calls, port, tools: new EnhancedTools(port), procedures };
 };
 
 const run = (
@@ -914,5 +930,153 @@ describe("decompile_all untrusted directory and provider facts", () => {
     expect(resumed.value).toMatchObject({
       counts: { written: 1, failed: 0, remaining: 2 },
     });
+  });
+});
+
+describe("decompile_all journal recovery", () => {
+  const directory = useOutputDirectory();
+
+  const indexRecord = async (address: string) =>
+    decompileDirectoryIndexSchema
+      .parse(
+        JSON.parse(
+          await readFile(
+            join(directory(), DECOMPILE_DIRECTORY_INDEX_NAME),
+            "utf8",
+          ),
+        ),
+      )
+      .functions.find((record) => record.address === address);
+
+  it("keeps a written file's checksum through a read error and skips it once readable", async () => {
+    expect((await run(harness().tools, directory())).ok).toBe(true);
+    const file = join(directory(), "functions/0x1000.c");
+    const original = await readFile(file);
+    const written = await indexRecord("0x1000");
+    // A directory in the file's place makes the read fail without being absent.
+    await rm(file);
+    await mkdir(file);
+    const blocked = await run(harness().tools, directory(), { resume: true });
+    expect(blocked.ok).toBe(true);
+    if (!blocked.ok) return;
+    expect(blocked.value).toMatchObject({
+      counts: { failed: 1, skipped: 2, written: 0 },
+      failures: [
+        expect.objectContaining({ address: "0x1000", code: "output_io" }),
+      ],
+    });
+    expect((await indexRecord("0x1000"))?.status).toBe("failed");
+
+    await rm(file, { recursive: true });
+    await writeFile(file, original);
+    const next = harness();
+    const recovered = await run(next.tools, directory(), { resume: true });
+    expect(recovered.ok).toBe(true);
+    if (!recovered.ok) return;
+    expect(recovered.value).toMatchObject({
+      counts: { failed: 0, skipped: 3, written: 0 },
+    });
+    expect(of(next.calls, "procedure_pseudo_code")).toHaveLength(0);
+    expect(await indexRecord("0x1000")).toEqual(written);
+  });
+
+  it("bounds per-function provider caveats in the answer and keeps each in its file", async () => {
+    const procedures = Array.from({ length: 20 }, (_, index) => ({
+      address: `0x${(0x1000 + index * 0x10).toString(16)}`,
+      name: `fn_${index}`,
+    }));
+    const { port } = harness({ procedures, addressCaveats: true });
+    const composed = await executeComposedWorkflow(
+      port,
+      (observed) =>
+        new EnhancedTools(observed).execute("decompile_all", {
+          output_directory: directory(),
+        }),
+      composedLimitationBudget("decompile_all"),
+    );
+    expect(composed.ok).toBe(true);
+    if (!composed.ok) return;
+    const { limitations } = composed.value;
+    // The shared caveat is kept; 39 per-address caveats collapse to a count.
+    expect(limitations).toHaveLength(9);
+    expect(limitations).toContainEqual(
+      expect.stringContaining("terminal call may cut the body"),
+    );
+    expect(limitations.at(-1)).toBe(
+      "33 further distinct per-item provider limitations were omitted from this answer; each function's file header or index failure record keeps the caveats of the observations it used.",
+    );
+    const last = await readFile(
+      join(directory(), "functions/0x1130.c"),
+      "utf8",
+    );
+    expect(last).toContain("info caveat at 0x1130");
+    expect(last).toContain("terminal call at 0x1130");
+  });
+
+  it("keeps the caveats a failed attempt used in its index record", async () => {
+    const { tools } = harness({
+      addressCaveats: true,
+      fail: { "0x1000": "timeout", "0x2000": "empty" },
+    });
+    expect((await run(tools, directory())).ok).toBe(true);
+    expect((await indexRecord("0x1000"))?.limitations).toEqual([
+      "info caveat at 0x1000",
+    ]);
+    // The fixture's empty pseudocode observation reports no caveats.
+    expect((await indexRecord("0x2000"))?.limitations).toEqual([
+      "info caveat at 0x2000",
+    ]);
+    expect((await indexRecord("0x3000"))?.limitations).toBeUndefined();
+  });
+});
+
+describe("decompile_all late cancellation", () => {
+  const directory = useOutputDirectory();
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("reports cancellation when the caller aborts while the index is written", async () => {
+    const controller = new AbortController();
+    const reason = new Error("caller stopped");
+    const writeIndex = DecompileExport.prototype.writeIndex;
+    vi.spyOn(DecompileExport.prototype, "writeIndex").mockImplementation(
+      function (this: DecompileExport, input) {
+        controller.abort(reason);
+        return writeIndex.call(this, input);
+      },
+    );
+    const result = await run(
+      harness().tools,
+      directory(),
+      {},
+      controller.signal,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(result.error.cause).toBe(reason);
+    // Finalization still completed, so the export resumes without new work.
+    vi.restoreAllMocks();
+    const next = harness();
+    const resumed = await run(next.tools, directory(), { resume: true });
+    expect(resumed.ok).toBe(true);
+    expect(of(next.calls, "procedure_pseudo_code")).toHaveLength(0);
+  });
+
+  it("keeps an index failure primary when the caller also aborts", async () => {
+    const controller = new AbortController();
+    const failure = new AnalysisOutputError("decompile_all", "index failed");
+    vi.spyOn(DecompileExport.prototype, "writeIndex").mockImplementation(() => {
+      controller.abort(new Error("caller stopped"));
+      return Promise.resolve(err(failure));
+    });
+    const result = await run(
+      harness().tools,
+      directory(),
+      {},
+      controller.signal,
+    );
+    expect(result).toEqual(err(failure));
   });
 });

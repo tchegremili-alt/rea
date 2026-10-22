@@ -15,6 +15,7 @@ import type { ProgressReporter } from "../application/ProgressReporter.js";
 import { EnhancedTools } from "../application/EnhancedTools.js";
 import type { ValidatedEnhancedCall } from "../application/EnhancedToolTypes.js";
 import {
+  composedLimitationBudget,
   executeComposedWorkflow,
   createWorkflowEvidence,
   workflowSnapshotRecord,
@@ -254,11 +255,14 @@ const executeEnhancedTool = async (
           }),
       };
       const result = await logToolExecution(registration.logger, name, () =>
-        executeComposedWorkflow(analysis, (observed) =>
-          new EnhancedTools(observed).executeValidated(
-            validatedCall,
-            context.mcpReq.signal,
-          ),
+        executeComposedWorkflow(
+          analysis,
+          (observed) =>
+            new EnhancedTools(observed).executeValidated(
+              validatedCall,
+              context.mcpReq.signal,
+            ),
+          composedLimitationBudget(name),
         ),
       );
       await progress.report({
