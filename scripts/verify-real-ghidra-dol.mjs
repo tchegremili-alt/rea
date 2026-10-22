@@ -2,14 +2,16 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readdir, readFile, mkdtemp, mkdir, rm } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
+import { readFile, mkdtemp, mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { parseBinaryTarget } from "../dist/application/BinaryTargetResolver.js";
+import { ArtifactResourceScope } from "../dist/artifacts/ArtifactResourceScope.js";
+import { readGhidraLanguageCatalog } from "../dist/ghidra/GhidraLanguageCatalog.js";
 import { parseEvidence } from "../dist/domain/evidence.js";
 import { parseAnalysisSnapshot } from "../dist/domain/analysisSnapshot.js";
 import { functionDossierSchema } from "../dist/domain/hopperValues.js";
@@ -18,10 +20,6 @@ import { buildGameCubeDolFixture } from "../tests/conformance/ghidra/dol-fixture
 import {
   GEKKO_LANGUAGE,
   STOCK_LANGUAGE,
-  DOL_ENTRY,
-  DOL_LEAF,
-  DOL_GLOBAL,
-  DOL_MARKER,
   assertDolAgainstElf,
   assertDolEntryProcedure,
   assertDolGap,
@@ -76,41 +74,27 @@ for (const setting of ["GHIDRA_HEADLESS_MAXMEM", "GHIDRA_MAXMEM"]) {
     baseEnv[setting] = process.env[setting];
 }
 
-/** True when a language id is declared by an .ldefs file in the Ghidra install or user extensions. */
+/**
+ * True when GhidraProvider would admit the language id as an override: the same
+ * installation catalog reader it uses. User extensions are not in that catalog.
+ */
 async function languageInstalled(languageId) {
-  const roots = [
-    join(installation.installDir, "Ghidra", "Processors"),
-    join(installation.installDir, "Ghidra", "Extensions"),
-  ];
-  const userRoot = join(homedir(), "Library", "ghidra");
-  for (const entry of await readdir(userRoot, { withFileTypes: true }).catch(
-    () => [],
-  )) {
-    if (entry.isDirectory())
-      roots.push(join(userRoot, entry.name, "Extensions"));
+  const scope = new ArtifactResourceScope();
+  try {
+    const catalog = await readGhidraLanguageCatalog(
+      installation.installDir,
+      scope,
+    );
+    return catalog.some((definition) => definition.id === languageId);
+  } finally {
+    await scope.close();
   }
-  const walk = async (dir, depth) => {
-    for (const entry of await readdir(dir, { withFileTypes: true }).catch(
-      () => [],
-    )) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory() && depth < 6) {
-        if (await walk(path, depth + 1)) return true;
-      } else if (entry.name.endsWith(".ldefs")) {
-        if ((await readFile(path, "utf8")).includes(`id="${languageId}"`))
-          return true;
-      }
-    }
-    return false;
-  };
-  for (const root of roots) if (await walk(root, 0)) return true;
-  return false;
 }
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /** One MCP session plus CLI check. `languageOverride` is set only for the Gekko pass. */
-async function runPass({ fixture, languageOverride, label }) {
+async function runPass({ fixture, languageOverride, label, layout }) {
   const env = { ...baseEnv };
   if (languageOverride !== undefined)
     env.REA_GHIDRA_LANGUAGE_ID = languageOverride;
@@ -151,18 +135,18 @@ async function runPass({ fixture, languageOverride, label }) {
     report.compiler_spec_id = image.compiler_spec_id;
     report.attestation = image.status;
     const procedures = await call("list_procedures");
-    const entry = assertDolEntryProcedure(procedures);
+    const entry = assertDolEntryProcedure(procedures, layout.entry);
     report.entry = entry;
     if (languageOverride === undefined) {
       assert.ok(
-        procedures.some((p) => BigInt(p.address) === DOL_LEAF),
+        procedures.some((p) => BigInt(p.address) === layout.leaf),
         "Leaf function missing from real Ghidra inventory",
       );
       const callees = await call("procedure_callees", {
         procedure: entry.address,
       });
       assert.ok(
-        callees.some((address) => BigInt(address) === DOL_LEAF),
+        callees.some((address) => BigInt(address) === layout.leaf),
         "Direct call to leaf not recovered",
       );
       const dossier = functionDossierSchema.parse(
@@ -173,12 +157,12 @@ async function runPass({ fixture, languageOverride, label }) {
         "Decompiled entry lacks __start",
       );
       const global = await call("read_bytes", {
-        address: `0x${DOL_GLOBAL.toString(16)}`,
+        address: `0x${layout.global.toString(16)}`,
         length: 4,
       });
       assertDolGlobal(global.bytes_hex);
       const marker = await call("read_bytes", {
-        address: `0x${DOL_MARKER.toString(16)}`,
+        address: `0x${layout.marker.toString(16)}`,
         length: 29,
       });
       assert.equal(
@@ -186,12 +170,12 @@ async function runPass({ fixture, languageOverride, label }) {
         Buffer.from("rea-ppc-source-owned-fixture\0").toString("hex"),
       );
       const tail = await call("read_bytes", {
-        address: "0x80013030",
+        address: `0x${layout.tail.toString(16)}`,
         length: 4,
       });
       assertDolTail(tail.bytes_hex);
       const gap = await call("read_bytes", {
-        address: "0x80013010",
+        address: `0x${layout.bssGap.toString(16)}`,
         length: 4,
       });
       report.bss_gap_read = {
@@ -234,7 +218,7 @@ async function runPass({ fixture, languageOverride, label }) {
         entrypoint,
         "function",
         fixture.path,
-        "0x80003130",
+        `0x${layout.entry.toString(16)}`,
         "--target-format",
         "gamecube-dol",
         "--provider",
@@ -247,7 +231,7 @@ async function runPass({ fixture, languageOverride, label }) {
     assert.equal(evidence.subject?.architecture, "powerpc");
     assert.equal(evidence.subject?.digest.sha256, fixture.sha256);
     const cliDossier = functionDossierSchema.parse(evidence.normalized_result);
-    assert.equal(BigInt(cliDossier.procedure.address), DOL_ENTRY);
+    assert.equal(BigInt(cliDossier.procedure.address), layout.entry);
     assert.ok(cliDossier.pseudocode.includes("__start"));
     report.cli = {
       entry: cliDossier.procedure.address,
@@ -278,25 +262,36 @@ try {
   if (!resolved.ok) throw resolved.error;
   assert.equal(resolved.value.format, "gamecube-dol");
   assert.equal(resolved.value.sha256, fixture.sha256);
-  assert.equal(BigInt(resolved.value.entryPoint), DOL_ENTRY);
+  // Addresses come from the independent readelf symbol table, not from constants.
+  const symbols = independentElf.symbols;
+  const layout = {
+    entry: symbols.rea_ppc_entry,
+    leaf: symbols.rea_ppc_leaf,
+    global: symbols.rea_dol_global,
+    marker: symbols.rea_ppc_marker,
+    tail: symbols.rea_dol_tail,
+    bssGap: BigInt(shape.gaps[0].start),
+  };
+  assert.equal(BigInt(resolved.value.entryPoint), layout.entry);
   reports.push({
     fixture: "stock",
     ...fixture,
     dol_shape: shape,
     readelf: independentElf.version,
   });
-  reports.push(await runPass({ fixture, label: "stock language" }));
+  reports.push(await runPass({ fixture, label: "stock language", layout }));
   if (await languageInstalled(GEKKO_LANGUAGE)) {
     reports.push(
       await runPass({
         fixture,
         languageOverride: GEKKO_LANGUAGE,
         label: "Gekko override",
+        layout,
       }),
     );
   } else {
     console.log(
-      `skipped: ${GEKKO_LANGUAGE} not installed (GameCubeLoader extension absent); stock lane still verified`,
+      `skipped: ${GEKKO_LANGUAGE} (not in the Ghidra installation catalog that REA admits); stock lane still verified`,
     );
   }
 } catch (cause) {

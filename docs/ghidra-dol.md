@@ -71,7 +71,8 @@ reports, not only the requested one.
 variant. The language is not in stock Ghidra. It comes from the GameCubeLoader
 extension, by Cuyler, licensed under Apache-2.0. The extension ships
 `ppc_gekko_broadway.ldefs` under its `data/languages` directory and must be
-installed as a Ghidra extension. The stock lane never requires it.
+installed in the Ghidra installation's `Ghidra/Extensions` directory. The stock
+lane never requires it.
 
 Any other language id must start with `PowerPC:BE:32:`. Other languages are
 refused with a specific constraint.
@@ -105,10 +106,12 @@ bound language, the `__start` entry procedure, a direct call to the leaf
 function, decompilation, and bytes at the data, tail, marker and BSS-gap
 addresses. It also checks CLI identity.
 
-The Gekko pass runs only when `PowerPC:BE:32:Gekko_Broadway` is present in the
-installed Ghidra or user extensions. Otherwise the lane prints
-`skipped: PowerPC:BE:32:Gekko_Broadway not installed` and still succeeds on the
-stock checks.
+The Gekko pass runs only when `PowerPC:BE:32:Gekko_Broadway` is in the Ghidra
+installation's language catalog, the same catalog REA uses to admit
+`REA_GHIDRA_LANGUAGE_ID`. A language that exists only in a user extension under
+`~/Library/ghidra` is not admitted, so the lane prints
+`skipped: PowerPC:BE:32:Gekko_Broadway (not in the Ghidra installation catalog that REA admits); stock lane still verified`
+and still succeeds on the stock checks.
 
 The ELF lane (`npm run verify:ghidra:ppc`) is separate. See
 [PowerPC ELF analysis through Ghidra](/ghidra-ppc).

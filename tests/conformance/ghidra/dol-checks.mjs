@@ -1,18 +1,21 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { DOL_FIXTURE_TAIL_ADDRESS } from "./dol-fixture.mjs";
 
 const execute = promisify(execFile);
 // Stock language is the default; the Gekko override is checked only when installed.
 export const STOCK_LANGUAGE = "PowerPC:BE:32:default";
 export const GEKKO_LANGUAGE = "PowerPC:BE:32:Gekko_Broadway";
-export const DOL_ENTRY = 0x80003130n;
-export const DOL_LEAF = 0x80003100n;
-export const DOL_GLOBAL = 0x80013004n;
-export const DOL_MARKER = 0x800031bcn;
-const DOL_TAIL = BigInt(DOL_FIXTURE_TAIL_ADDRESS);
 const hex = (value) => `0x${BigInt(value).toString(16)}`;
+
+/** Fixture symbol names, read from the ELF symbol table by GNU readelf (never hard-coded addresses). */
+export const DOL_SYMBOLS = [
+  "rea_ppc_entry",
+  "rea_ppc_leaf",
+  "rea_ppc_marker",
+  "rea_dol_global",
+  "rea_dol_tail",
+];
 
 /** Independent DOL reader: header fields only, no REA parser. */
 export function parseDolHeaderIndependent(bytes) {
@@ -93,11 +96,9 @@ export function parseReadelfDolSource(text) {
   };
   return {
     loads,
-    symbols: {
-      rea_ppc_entry: symbol("rea_ppc_entry"),
-      rea_ppc_leaf: symbol("rea_ppc_leaf"),
-      rea_dol_tail: symbol("rea_dol_tail"),
-    },
+    symbols: Object.fromEntries(
+      DOL_SYMBOLS.map((name) => [name, symbol(name)]),
+    ),
   };
 }
 
@@ -179,9 +180,10 @@ export function assertDolAgainstElf(dol, dolBytes, elfBytes, elf, fixture) {
   assert.equal(data0.size, rw[0].fileSize, "data slot 0 size");
   assert.equal(data1.address, Number(rw[1].address), "data slot 1 address");
   assert.equal(data1.size, rw[1].fileSize, "data slot 1 size");
+  const tail = elf.symbols.rea_dol_tail;
   assert.equal(
     BigInt(data1.address),
-    DOL_TAIL,
+    tail,
     "data slot 1 is not the tail segment",
   );
   for (const [slot, load] of [
@@ -201,15 +203,12 @@ export function assertDolAgainstElf(dol, dolBytes, elfBytes, elf, fixture) {
   }
   assert.equal(
     dol.entry,
-    Number(DOL_ENTRY),
-    "DOL entry differs from the fixture's entry",
+    Number(elf.symbols.rea_ppc_entry),
+    "DOL entry differs from the ELF entry symbol",
   );
-  assert.equal(
-    elf.symbols.rea_ppc_entry,
-    DOL_ENTRY,
-    "ELF entry symbol differs from DOL entry",
-  );
-  assert.equal(elf.symbols.rea_dol_tail, DOL_TAIL, "tail global moved");
+  // The uncovered BSS gap runs from the end of data slot 0 to the tail segment.
+  const gapStart = BigInt(rw[0].address) + BigInt(rw[0].fileSize);
+  const gapEnd = tail;
   assert.deepEqual(
     dol.bss,
     fixture.bss,
@@ -218,7 +217,13 @@ export function assertDolAgainstElf(dol, dolBytes, elfBytes, elf, fixture) {
   const gaps = uncoveredBss(dol.bss, dataSlots);
   assert.deepEqual(
     gaps,
-    [{ start: "0x80013008", end: "0x80013030", length: 0x28 }],
+    [
+      {
+        start: hex(gapStart),
+        end: hex(gapEnd),
+        length: Number(gapEnd - gapStart),
+      },
+    ],
     "BSS gap set",
   );
   const overlap = dataSlots.filter(
@@ -253,8 +258,8 @@ export function assertDolLoadImage(image, { sha256, languageId }) {
 }
 
 /** Recovered entry is the header entry, labeled __start by the pre-script. */
-export function assertDolEntryProcedure(procedures) {
-  const entry = procedures.find((p) => BigInt(p.address) === DOL_ENTRY);
+export function assertDolEntryProcedure(procedures, entryAddress) {
+  const entry = procedures.find((p) => BigInt(p.address) === entryAddress);
   assert.ok(entry, "No procedure at the DOL entry");
   assert.equal(
     entry.value,

@@ -7,18 +7,43 @@ import { promisify } from "node:util";
 
 const execute = promisify(execFile);
 
-// Linker-script layout (dol-fixture.ld). Fixed here so the converter and checks agree.
+// Section base from the linker script (dol-fixture.ld `.dol_tail`). Everything else is read from the ELF.
 export const DOL_FIXTURE_TAIL_ADDRESS = 0x80013030;
-const DOL_BSS_START = 0x80013008;
-// The DOL has one BSS range. It is widened to 8 bytes into the tail segment, so it
-// partly overlaps data slot 1 and keeps a gap at 0x80013018..0x80013030.
-const DOL_BSS_END = DOL_FIXTURE_TAIL_ADDRESS + 8;
+// The DOL has one BSS range. It starts where the writable data ends and is widened
+// 8 bytes into the tail segment, so it partly overlaps data slot 1.
+const DOL_BSS_TAIL_BYTES = 8;
 const DOL_HEADER_SIZE = 0x100;
 const DOL_TEXT_MAX = 7;
 const DOL_DATA_MAX = 11;
 const MEMORY_START = 0x8000_0000;
 const PT_LOAD = 1;
 const PF_X = 1;
+
+/**
+ * BSS range derived from the ELF: it starts at the end of the lowest-address writable
+ * PT_LOAD's file bytes, and ends DOL_BSS_TAIL_BYTES into the tail section base.
+ */
+export function bssRangeFromElf(elf) {
+  const phoff = elf.readUInt32BE(0x1c);
+  const phentsize = elf.readUInt16BE(0x2a);
+  const phnum = elf.readUInt16BE(0x2c);
+  let first;
+  for (let i = 0; i < phnum; i++) {
+    const base = phoff + i * phentsize;
+    if (elf.readUInt32BE(base) !== PT_LOAD) continue;
+    const vaddr = elf.readUInt32BE(base + 8);
+    const filesz = elf.readUInt32BE(base + 16);
+    const flags = elf.readUInt32BE(base + 24);
+    if (flags & PF_X || filesz === 0) continue;
+    if (first === undefined || vaddr < first.vaddr) first = { vaddr, filesz };
+  }
+  if (first === undefined) throw new Error("ELF has no writable PT_LOAD");
+  const address = first.vaddr + first.filesz;
+  return {
+    address,
+    size: DOL_FIXTURE_TAIL_ADDRESS + DOL_BSS_TAIL_BYTES - address,
+  };
+}
 
 /** Convert a static big-endian ELF32 PowerPC image with PT_LOAD segments into a DOL. */
 export function convertElfToDol(elf, { bss }) {
@@ -108,9 +133,8 @@ export async function buildGameCubeDolFixture(directory) {
   const version = await execute(compiler, ["--version"], { timeout: 10000 });
   await execute(compiler, args, { timeout: 60000 });
   const elf = await readFile(elfPath);
-  const dol = convertElfToDol(elf, {
-    bss: { address: DOL_BSS_START, size: DOL_BSS_END - DOL_BSS_START },
-  });
+  const bss = bssRangeFromElf(elf);
+  const dol = convertElfToDol(elf, { bss });
   await writeFile(dolPath, dol);
   const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
   return {
@@ -118,7 +142,7 @@ export async function buildGameCubeDolFixture(directory) {
     elf_path: elfPath,
     sha256: sha(dol),
     elf_sha256: sha(elf),
-    bss: { address: DOL_BSS_START, size: DOL_BSS_END - DOL_BSS_START },
+    bss,
     compiler: version.stdout.trim(),
     arguments: args,
   };
