@@ -21,6 +21,7 @@ import {
   type ClientConfigurationDocument,
 } from "./ClientConfigurationDocument.js";
 import { dshDocument, DshCordisDocument } from "./DshCordisPatch.js";
+import { realpathSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { isClientConfigurationCleanupFailure } from "./ClientConfigurationCleanup.js";
@@ -679,12 +680,88 @@ const registrationCurrent = (
   desired: unknown,
 ): boolean =>
   (parsed.dialect !== "dsh" || dshDocument(parsed.document).ready) &&
-  clientConfigurationValuesEqual(
+  registrationValuesEqual(
     parsed.servers[PRODUCT_IDENTITY.mcpServerKey],
     desired,
   ) &&
   !Object.hasOwn(parsed.legacyServers, PRODUCT_IDENTITY.mcpServerKey) &&
   !clientServerListedDisabled(parsed, PRODUCT_IDENTITY.mcpServerKey);
+
+/**
+ * A setup invocation may reach the same direct launcher through a different
+ * symlink spelling. Keep the existing spelling when every other setting is
+ * current, rather than rewriting the client's configuration and backup.
+ */
+const registrationValuesEqual = (
+  current: unknown,
+  desired: unknown,
+): boolean => {
+  if (clientConfigurationValuesEqual(current, desired)) return true;
+  const currentCommand = directRegistrationCommand(current);
+  const desiredCommand = directRegistrationCommand(desired);
+  if (
+    currentCommand === undefined ||
+    desiredCommand === undefined ||
+    currentCommand.command.length !== desiredCommand.command.length ||
+    currentCommand.command.length < 2 ||
+    currentCommand.command
+      .slice(1)
+      .some((argument, index) => argument !== desiredCommand.command[index + 1])
+  )
+    return false;
+  const [currentExecutable] = currentCommand.command;
+  const [desiredExecutable] = desiredCommand.command;
+  try {
+    if (
+      realpathSync.native(currentExecutable!) !==
+      realpathSync.native(desiredExecutable!)
+    )
+      return false;
+  } catch {
+    // A launcher that cannot be resolved is not established as equivalent.
+    return false;
+  }
+  return clientConfigurationValuesEqual(
+    currentCommand.withCommand(desiredCommand.command),
+    desired,
+  );
+};
+
+type DirectRegistrationCommand = {
+  readonly command: readonly string[];
+  readonly withCommand: (command: readonly string[]) => unknown;
+};
+
+/** Return only the direct executable form; package-runner commands stay exact. */
+const directRegistrationCommand = (
+  value: unknown,
+): DirectRegistrationCommand | undefined => {
+  if (typeof value !== "object" || value === null) return undefined;
+  const entry = value as Record<string, unknown>;
+  if (
+    Array.isArray(entry.command) &&
+    entry.command.every((part) => typeof part === "string") &&
+    entry.args === undefined
+  )
+    return {
+      command: entry.command,
+      withCommand: (command) => ({ ...entry, command: [...command] }),
+    };
+  if (
+    typeof entry.command !== "string" ||
+    !Array.isArray(entry.args) ||
+    !entry.args.every((part) => typeof part === "string")
+  )
+    return undefined;
+  return {
+    command: [entry.command, ...entry.args],
+    withCommand: (command) => ({
+      ...entry,
+      command: command[0],
+      args: command.slice(1),
+    }),
+  };
+};
 
 const clientConfigurationDesired = async (
   client: SetupClient,

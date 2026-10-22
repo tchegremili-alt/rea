@@ -40,6 +40,17 @@ cliTest.skipIf(process.platform === "win32").for([
       "--json",
     ]);
     expect(setup.exitCode, setup.stderr).toBe(0);
+    const configured = await readFile(config, "utf8");
+    const repeatedSetup = await run(alternate, [
+      "setup",
+      "--client",
+      "cursor",
+      "--skill=false",
+      "--yes",
+      "--json",
+    ]);
+    expect(repeatedSetup.exitCode, repeatedSetup.stderr).toBe(0);
+    expect(await readFile(config, "utf8")).toBe(configured);
     for (const alias of [registered, alternate]) {
       const doctor = await run(alias, [
         "doctor",
