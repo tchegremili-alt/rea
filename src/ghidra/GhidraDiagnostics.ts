@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { JsonValue } from "../domain/jsonValue.js";
 import { redactCapturedTransportCredential } from "../process/ProviderDiagnosticRedaction.js";
 import type {
@@ -138,6 +139,45 @@ export const ghidraFailureOutput = (
     };
   }),
 });
+
+/**
+ * Omit the session transcript only after the bridge answered and operation
+ * output is proven complete; start/process/protocol/timeout/cleanup failures retain it.
+ */
+export const operationScopedGhidraDiagnostics = (
+  diagnostics: Readonly<Record<string, JsonValue>>,
+): Readonly<Record<string, JsonValue>> => {
+  const failureOutput = diagnostics.failure_output;
+  if (
+    failureOutput === null ||
+    typeof failureOutput !== "object" ||
+    Array.isArray(failureOutput) ||
+    failureOutput.complete !== true
+  )
+    return diagnostics;
+  const omitText = (value: JsonValue | undefined): JsonValue | undefined => {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      Array.isArray(value) ||
+      typeof value.text !== "string"
+    )
+      return undefined;
+    const text = value.text;
+    const stream = { ...value };
+    delete stream.text;
+    return {
+      ...stream,
+      retained_sha256: createHash("sha256").update(text).digest("hex"),
+      text_omitted: "session_transcript",
+    };
+  };
+  const stdout = omitText(diagnostics.stdout);
+  const stderr = omitText(diagnostics.stderr);
+  return stdout === undefined || stderr === undefined
+    ? diagnostics
+    : { ...diagnostics, stdout, stderr };
+};
 
 export const ghidraDiagnosticStream = (
   stream: ProviderProcessSnapshot["stdout"],

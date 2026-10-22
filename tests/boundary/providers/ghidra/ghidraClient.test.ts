@@ -1039,6 +1039,15 @@ describe("GhidraClient", () => {
         },
       },
     });
+    if (result.ok) throw new Error("Expected remote failure");
+    expect(result.error.diagnostics.stdout).not.toHaveProperty("text");
+    expect(result.error.diagnostics.stdout).toMatchObject({
+      text_omitted: "session_transcript",
+      retained_sha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+    });
+    expect(result.error.diagnostics.failure_output).toMatchObject({
+      complete: true,
+    });
   });
 
   it.each([

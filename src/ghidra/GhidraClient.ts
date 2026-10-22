@@ -49,6 +49,7 @@ import {
   ghidraFailureOutput,
   GHIDRA_JVM_OOME_MARKER,
   GHIDRA_PROCESS_DIAGNOSTIC_BYTES,
+  operationScopedGhidraDiagnostics,
 } from "./GhidraDiagnostics.js";
 import { GhidraLaunchError, type GhidraLaunch } from "./GhidraLauncher.js";
 import { GhidraResponseRouter } from "./GhidraResponseRouter.js";
@@ -225,6 +226,12 @@ export class GhidraClient {
               ),
             );
           }
+          if (!result.ok && result.error.kind === "remote")
+            return err(
+              result.error.withDiagnostics(
+                operationScopedGhidraDiagnostics(result.error.diagnostics),
+              ),
+            );
           return result;
         } finally {
           if (this.#activeOutputCheckpoint === checkpoint)

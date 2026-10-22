@@ -1,7 +1,64 @@
+import { createHash } from "node:crypto";
 import { ProcessOutputTokenScanner } from "../process/ProcessOutputTokenScanner.js";
-import { ghidraFailureOutput } from "./GhidraDiagnostics.js";
+import {
+  ghidraFailureOutput,
+  operationScopedGhidraDiagnostics,
+} from "./GhidraDiagnostics.js";
 import { expect, it } from "vitest";
 import { createGhidraDiagnostics } from "./GhidraDiagnostics.js";
+
+it("omits complete operation output while retaining transcript digests", () => {
+  const stdoutText = "session stdout\n";
+  const stderrText = "session stderr\n";
+  const diagnostics = {
+    stdout: { text: stdoutText, bytes: 17, retained_bytes: 17 },
+    stderr: { text: stderrText, bytes: 17, retained_bytes: 17 },
+    failure_output: {
+      stdout: { text: "" },
+      stderr: { text: "" },
+      complete: true,
+    },
+    ghidra_log_path: "/runtime/ghidra.log",
+  };
+
+  const scoped = operationScopedGhidraDiagnostics(diagnostics);
+
+  expect(scoped).toMatchObject({
+    stdout: {
+      bytes: 17,
+      retained_bytes: 17,
+      retained_sha256: createHash("sha256").update(stdoutText).digest("hex"),
+      text_omitted: "session_transcript",
+    },
+    stderr: {
+      retained_sha256: createHash("sha256").update(stderrText).digest("hex"),
+      text_omitted: "session_transcript",
+    },
+    failure_output: diagnostics.failure_output,
+    ghidra_log_path: diagnostics.ghidra_log_path,
+  });
+  expect(scoped.stdout).not.toHaveProperty("text");
+  expect(scoped.stderr).not.toHaveProperty("text");
+});
+
+it("keeps full diagnostics when operation output is incomplete", () => {
+  const diagnostics = {
+    stdout: { text: "session transcript" },
+    stderr: { text: "" },
+    failure_output: { stdout: { text: "partial" }, complete: false },
+  };
+
+  expect(operationScopedGhidraDiagnostics(diagnostics)).toBe(diagnostics);
+});
+
+it("keeps full diagnostics when operation output scope is missing", () => {
+  const diagnostics = {
+    stdout: { text: "session transcript" },
+    stderr: { text: "" },
+  };
+
+  expect(operationScopedGhidraDiagnostics(diagnostics)).toBe(diagnostics);
+});
 
 it("does not reuse historical operation-scoped failure output without a current owner", () => {
   const diagnostics = createGhidraDiagnostics({
