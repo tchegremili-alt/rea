@@ -65,6 +65,7 @@ For development, use [testing](testing.md), [client verification](client-verific
 [tool design](tool-design.md), and [releasing](releasing.md).
 [Reconstruction readiness](reconstruction-readiness.md) describes a development
 conformance verifier. [The 6.2 migration](migration-6.2.md) records that release's
-compatibility changes; [the roadmap](roadmap.md) tracks future work.
+compatibility changes; [the 6.6 migration](migration-6.6.md) records the evidence
+identity change for saved Evidence; [the roadmap](roadmap.md) tracks future work.
 
 ![REA inspecting a native binary in Hopper](./assets/rea-hopper-analysis.png)

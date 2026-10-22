@@ -7,7 +7,10 @@ import {
   EvidenceIntegrityError,
   EvidenceReferenceError,
 } from "../../domain/evidenceErrors.js";
-import type { Evidence } from "../../domain/evidence.js";
+import {
+  matchesEvidenceIdentity,
+  type Evidence,
+} from "../../domain/evidence.js";
 import { err, ok, type Result } from "../../domain/result.js";
 
 /** Resolve only an artifact summary's exact retained owner before comparison. */
@@ -51,7 +54,9 @@ export const resolveArtifactComparisonEvidence = (
     (evidenceId) => (evidenceId === parentId ? parent : undefined),
   );
   if (!reprojected.ok) return reprojected;
-  if (reprojected.value.evidence_id !== evidence.evidence_id)
+  // The re-projected summary always carries the current identity; accept a
+  // retained 6.5.0 record whose ID matches its legacy projection as well.
+  if (!matchesEvidenceIdentity(reprojected.value, evidence.evidence_id))
     return err(
       new EvidenceIntegrityError(
         "Artifact summary does not match its retained parent inventory.",

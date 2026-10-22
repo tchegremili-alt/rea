@@ -2,6 +2,7 @@ import { fc, it } from "@fast-check/vitest";
 import { describe, expect } from "vitest";
 
 import { createAnalysisProfile } from "./analysisProfile.js";
+import { digestCanonicalValue } from "./canonicalDigest.js";
 import {
   RAW_ONLY_ARCHITECTURES,
   type BinaryTarget,
@@ -103,6 +104,48 @@ it("requires explicit coverage in serialized Evidence while producers encode omi
   delete oldEnvelope.relationship_coverage;
   expect(evidenceSchema.safeParse(oldEnvelope).success).toBe(false);
   expect(() => parseEvidence(oldEnvelope)).toThrow();
+});
+
+it("accepts 6.5.0 Evidence identity when relationship coverage is explicitly null", () => {
+  const evidence = createEvidence(TARGET, PROVIDER, {
+    operation: "procedure_callees",
+    parameters: { procedure: "0x1000" },
+    result: ["0x2000"],
+  });
+  const { subject } = evidence;
+  const legacyProjection = {
+    subject:
+      subject === null
+        ? null
+        : {
+            digest: subject.digest,
+            format: subject.format,
+            architecture: subject.architecture,
+          },
+    provider: evidence.provider,
+    analysis_profile: evidence.analysis_profile,
+    predicate_type: evidence.predicate_type,
+    operation: evidence.operation,
+    parameters: evidence.parameters,
+    raw_result: evidence.raw_result,
+    normalized_result: evidence.normalized_result,
+    confidence: evidence.confidence,
+    authority: evidence.authority,
+    environment: evidence.environment,
+    limitations: evidence.limitations,
+    locations: evidence.locations,
+    evidence_links: evidence.evidence_links,
+  };
+  const legacy = {
+    ...evidence,
+    evidence_id: `ev_${digestCanonicalValue(legacyProjection, "Evidence")}`,
+  };
+
+  expect(legacy.relationship_coverage).toBeNull();
+  expect(parseEvidence(legacy)).toEqual(legacy);
+  const missingCoverage = { ...legacy } as Record<string, unknown>;
+  delete missingCoverage.relationship_coverage;
+  expect(() => parseEvidence(missingCoverage)).toThrow();
 });
 
 it("projects known provider fields and preserves open JSON payloads", () => {

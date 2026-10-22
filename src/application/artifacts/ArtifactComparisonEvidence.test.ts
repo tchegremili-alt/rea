@@ -3,6 +3,7 @@ import { expect, it } from "vitest";
 import { inspectAnalysisView } from "../analysisView/AnalysisViewService.js";
 import { ARTIFACT_COMPARISON_EXAMPLE } from "../../contracts/artifactComparisonExample.js";
 import { artifactInventorySummaryViewResultSchema } from "../../domain/analysisView/analysisView.js";
+import { digestCanonicalValue } from "../../domain/canonicalDigest.js";
 import {
   createEvidence,
   parseEvidence,
@@ -161,6 +162,42 @@ it("accepts display-only subject changes excluded from Evidence identity", () =>
   const resolved = resolveArtifactComparisonEvidence(
     displayOnly,
     (evidenceId) => (evidenceId === parent.evidence_id ? parent : undefined),
+  );
+  expect(resolved).toEqual({ ok: true, value: parent });
+});
+
+it("accepts a retained 6.5.0 summary whose legacy ID omits null coverage", () => {
+  const { parent, summary } = artifactSummary();
+  if (summary.subject === null || summary.relationship_coverage !== null)
+    throw new Error("fixture summary must carry explicit null coverage");
+  // 6.5.0 projected the summary identity without the null relationship_coverage
+  // field, so its retained ID differs from what the current projection emits.
+  const legacyProjection = {
+    subject: {
+      digest: summary.subject.digest,
+      format: summary.subject.format,
+      architecture: summary.subject.architecture,
+    },
+    provider: summary.provider,
+    analysis_profile: summary.analysis_profile,
+    predicate_type: summary.predicate_type,
+    operation: summary.operation,
+    parameters: summary.parameters,
+    raw_result: summary.raw_result,
+    normalized_result: summary.normalized_result,
+    confidence: summary.confidence,
+    authority: summary.authority,
+    environment: summary.environment,
+    limitations: summary.limitations,
+    locations: summary.locations,
+    evidence_links: summary.evidence_links,
+  };
+  const legacy = parseEvidence({
+    ...summary,
+    evidence_id: `ev_${digestCanonicalValue(legacyProjection, "Evidence")}`,
+  });
+  const resolved = resolveArtifactComparisonEvidence(legacy, (evidenceId) =>
+    evidenceId === parent.evidence_id ? parent : undefined,
   );
   expect(resolved).toEqual({ ok: true, value: parent });
 });
