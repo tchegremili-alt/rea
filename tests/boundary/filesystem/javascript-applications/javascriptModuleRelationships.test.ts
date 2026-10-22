@@ -727,3 +727,56 @@ const moduleFixture = async (): Promise<string> => {
   });
   return root;
 };
+
+it("retains CommonJS exports through erased receiver wrappers", async () => {
+  const root = await createTestTempDirectory("rea-wrapped-commonjs-");
+  await writeFixtureFiles(root, {
+    "app.cts": `
+          (exports as Record<string, unknown>).asserted = 1;
+          (module!.exports satisfies Record<string, unknown>).checked = 2;
+          (<Record<string, unknown>>module.exports).cast = 3;
+          module.exports!.nonNull = 4;
+    `,
+  });
+  const graph = await relationshipGraph(root);
+  const module = findSourceModule(graph, "app.cts");
+  const names = ["asserted", "cast", "checked", "nonNull"];
+  expect(
+    module?.observations.find(
+      ({ properties }) => properties.semantic_role === "source-module",
+    )?.properties.export_names,
+  ).toEqual(names);
+  for (const name of names) {
+    const exported = findExportNode(graph, "app.cts", name);
+    expect(exported).toBeDefined();
+    expect(graph.edges).toContainEqual(
+      expect.objectContaining({
+        source_node_id: module?.node_id,
+        target_node_id: exported?.node_id,
+        relation: "exposes",
+      }),
+    );
+  }
+});
+
+it("preserves CommonJS receiver lifetime and shadowing through erased wrappers", async () => {
+  const root = await createTestTempDirectory("rea-wrapped-commonjs-");
+  await writeFixtureFiles(root, {
+    "app.cts": `
+          (module as any).exports = {};
+          (exports as any).detached = 1;
+          (module.exports as any).connected = 2;
+          function local(exports: any, module: any) {
+            exports!.shadowed = 3;
+            module!.exports.shadowed = 4;
+          }
+    `,
+  });
+  const graph = await relationshipGraph(root);
+  const module = findSourceModule(graph, "app.cts");
+  expect(
+    module?.observations.find(
+      ({ properties }) => properties.semantic_role === "source-module",
+    )?.properties.export_names,
+  ).toEqual(["connected", "default"]);
+});
