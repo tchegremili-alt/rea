@@ -19,6 +19,8 @@ export const rustArchitectureForSubject = (architecture: string) => {
       return "x86";
     case "amd64":
       return "x86_64";
+    case "ppc":
+      return "powerpc";
     default:
       return BINARY_ARCHITECTURES.find(
         (supported) => supported === architecture,
