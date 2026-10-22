@@ -339,6 +339,12 @@ const normalizeAdvertisedSchema = (value: unknown): SchemaNormalization => {
   return { schema: node, changed };
 };
 
+const withoutDefault = (schema: unknown): unknown => {
+  if (!isObject(schema) || !("default" in schema)) return schema;
+  const { default: _default, ...rest } = schema;
+  return rest;
+};
+
 // Anthropic tool input schemas reject anyOf, oneOf, and allOf at the root, and
 // clients then drop the tool or advertise it without parameters. Present a
 // root union of strict object groups as one object whose properties are the
@@ -372,13 +378,30 @@ const flattenRootObjectUnion = (
   );
   if (!branches.every((branch) => branch !== undefined)) return root;
   const variants = new Map<string, unknown[]>();
+  const owners = new Map<string, number>();
   for (const branch of branches)
     for (const [name, schema] of Object.entries(branch.properties ?? {})) {
       const known = variants.get(name) ?? [];
       if (!known.some((seen) => isDeepStrictEqual(seen, schema)))
         known.push(schema);
       variants.set(name, known);
+      owners.set(name, (owners.get(name) ?? 0) + 1);
     }
+  // Clients may send advertised defaults with every call. A default for a
+  // property that only some groups accept would then make the other groups
+  // fail strict validation, so only properties shared by all groups keep one.
+  for (const [name, schemas] of variants)
+    if (owners.get(name) !== branches.length)
+      variants.set(
+        name,
+        schemas
+          .map(withoutDefault)
+          .filter(
+            (schema, index, all) =>
+              all.findIndex((seen) => isDeepStrictEqual(seen, schema)) ===
+              index,
+          ),
+      );
   const required = sharedRequiredProperties(branches);
   // A coarse property minimum rejects underspecified objects. Partner fields
   // and exact group membership remain enforced by the canonical runtime parser.
