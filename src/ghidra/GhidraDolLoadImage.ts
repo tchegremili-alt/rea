@@ -23,6 +23,38 @@ export interface DolSnapshotDigests {
   readonly bytes: number;
   readonly sectionSha256: readonly string[];
 }
+type Permissions = {
+  readonly readable: boolean;
+  readonly writable: boolean;
+  readonly executable: boolean;
+};
+/** Permissions the DOL import must set: text r-x, data rw-, BSS rw- (see ReaGhidraPrepareDol.java). */
+const TEXT_PERMISSIONS: Permissions = {
+  readable: true,
+  writable: false,
+  executable: true,
+};
+const DATA_PERMISSIONS: Permissions = {
+  readable: true,
+  writable: true,
+  executable: false,
+};
+type FileFacts = {
+  readonly start: string;
+  readonly end: string;
+  readonly length: number;
+  readonly file_offset: number | null;
+  readonly sha256: string | null;
+  readonly source_file_index: number | null;
+  readonly initialized: boolean;
+  readonly loaded: boolean;
+  readonly overlay: boolean;
+  readonly address_space: string;
+  readonly readable: boolean;
+  readonly writable: boolean;
+  readonly executable: boolean;
+};
+type BssFacts = Omit<FileFacts, "file_offset" | "sha256" | "source_file_index">;
 const hex = (value: number): string => `0x${value.toString(16)}`;
 const byStart = <T extends { readonly start: string }>(left: T, right: T) =>
   Number(BigInt(left.start) - BigInt(right.start));
@@ -83,18 +115,7 @@ export const attestGhidraDolLoadImage = (
   };
 
   // Field order is fixed: checks compare serialized values.
-  const fileFacts = (mapping: {
-    readonly start: string;
-    readonly end: string;
-    readonly length: number;
-    readonly file_offset: number | null;
-    readonly sha256: string | null;
-    readonly source_file_index: number | null;
-    readonly initialized: boolean;
-    readonly loaded: boolean;
-    readonly overlay: boolean;
-    readonly address_space: string;
-  }) => ({
+  const fileFacts = (mapping: FileFacts) => ({
     start: mapping.start,
     end: mapping.end,
     length: mapping.length,
@@ -105,11 +126,28 @@ export const attestGhidraDolLoadImage = (
     loaded: mapping.loaded,
     overlay: mapping.overlay,
     address_space: mapping.address_space,
+    readable: mapping.readable,
+    writable: mapping.writable,
+    executable: mapping.executable,
+  });
+  const bssFacts = (mapping: BssFacts) => ({
+    start: mapping.start,
+    end: mapping.end,
+    length: mapping.length,
+    initialized: mapping.initialized,
+    loaded: mapping.loaded,
+    overlay: mapping.overlay,
+    address_space: mapping.address_space,
+    readable: mapping.readable,
+    writable: mapping.writable,
+    executable: mapping.executable,
   });
 
   const expectedFileMappings = header.sections
     .map((section, index) => {
-      return fileFacts({
+      const permissions =
+        section.kind === "text" ? TEXT_PERMISSIONS : DATA_PERMISSIONS;
+      return {
         start: hex(section.address),
         end: hex(section.address + section.size - 1),
         length: section.size,
@@ -120,25 +158,13 @@ export const attestGhidraDolLoadImage = (
         loaded: true,
         overlay: false,
         address_space: observations.default_address_space,
-      });
+        ...permissions,
+      };
     })
     .sort(byStart);
   const observedFileMappings = observations.mappings
     .filter((mapping) => mapping.source_file_index !== null)
-    .map((mapping) =>
-      fileFacts({
-        start: mapping.start,
-        end: mapping.end,
-        length: mapping.length,
-        file_offset: mapping.file_offset,
-        sha256: mapping.sha256,
-        source_file_index: mapping.source_file_index,
-        initialized: mapping.initialized,
-        loaded: mapping.loaded,
-        overlay: mapping.overlay,
-        address_space: mapping.address_space,
-      }),
-    )
+    .map((mapping) => fileFacts(mapping))
     .sort(byStart);
 
   const dataRanges = header.sections
@@ -151,24 +177,27 @@ export const attestGhidraDolLoadImage = (
     start: header.bss.address,
     end: header.bss.address + header.bss.size,
   };
+  const inBss = (address: string): boolean =>
+    BigInt(address) >= BigInt(bssRange.start) &&
+    BigInt(address) < BigInt(bssRange.end);
   const expectedBss = uncoveredBss(bssRange, dataRanges).map((gap) => ({
     start: hex(gap.start),
     end: hex(gap.end - 1),
     length: gap.end - gap.start,
+    initialized: false,
+    loaded: true,
+    overlay: false,
+    address_space: observations.default_address_space,
+    ...DATA_PERMISSIONS,
   }));
-  const observedBss = observations.mappings
-    .filter(
-      (mapping) =>
-        mapping.source_file_index === null &&
-        !mapping.initialized &&
-        BigInt(mapping.start) >= BigInt(bssRange.start) &&
-        BigInt(mapping.start) < BigInt(bssRange.end),
-    )
-    .map((mapping) => ({
-      start: mapping.start,
-      end: mapping.end,
-      length: mapping.length,
-    }))
+  const observedBssBlocks = observations.mappings.filter(
+    (mapping) =>
+      mapping.source_file_index === null &&
+      !mapping.initialized &&
+      inBss(mapping.start),
+  );
+  const observedBss = observedBssBlocks
+    .map((mapping) => bssFacts(mapping))
     .sort(byStart);
 
   const source = observations.source_files[0];
@@ -187,6 +216,29 @@ export const attestGhidraDolLoadImage = (
   check("modified_file_sha256", target.sha256, source?.modified_sha256 ?? null);
   check("file_backed_mappings", expectedFileMappings, observedFileMappings);
   check("bss_mappings", expectedBss, observedBss);
+  // One check per observed block, so a mismatch names the block that broke.
+  for (const mapping of observations.mappings) {
+    if (mapping.source_file_index !== null) {
+      check(
+        `block ${mapping.block} at ${mapping.start}`,
+        expectedFileMappings.find(
+          (expected) => expected.start === mapping.start,
+        ) ?? null,
+        fileFacts(mapping),
+        mapping.file_offset,
+        mapping.start,
+      );
+    } else if (observedBssBlocks.includes(mapping)) {
+      check(
+        `block ${mapping.block} at ${mapping.start}`,
+        expectedBss.find((expected) => expected.start === mapping.start) ??
+          null,
+        bssFacts(mapping),
+        null,
+        mapping.start,
+      );
+    }
+  }
   check(
     "initialized_unbacked_mappings",
     0,
@@ -224,7 +276,7 @@ export const attestGhidraDolLoadImage = (
       checks,
       limitations: [
         "GameCube DOL is a header interpretation explicitly selected by the caller; the format is not identified from file bytes.",
-        "Verification covers original/modified FileBytes identity, every used text and data section at its load address with exact file-byte digests, BSS as uninitialized gaps outside data sections, and the header entry. Mapping ends are inclusive.",
+        "Verification covers original/modified FileBytes identity, every used text and data section at its load address with exact file-byte digests, BSS as uninitialized gaps outside data sections, and the header entry. Each block is checked for address space, initialized/loaded/overlay state and read/write/execute permissions (text r-x, data and BSS rw-). Mapping ends are inclusive.",
         "The 256-byte header and any bytes between sections are not mapped and are not verified. Language-defined uninitialized blocks outside BSS are preserved as observations and not attested.",
         "A mismatching digest identifies its source range, not the first differing byte. No runtime, boot, or hardware state is modeled.",
       ],

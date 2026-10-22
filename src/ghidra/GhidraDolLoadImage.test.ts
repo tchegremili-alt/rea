@@ -105,6 +105,7 @@ const observationsFor = (
       sha256: sha(
         bytes.subarray(section.fileOffset, section.fileOffset + section.size),
       ),
+      ...(section.kind === "text" ? TEXT_PERM : DATA_PERM),
     })),
     ...EXPECTED_GAPS.map((gap) => ({
       block: "bss",
@@ -118,12 +119,17 @@ const observationsFor = (
       source_file_index: null,
       file_offset: null,
       sha256: null,
+      ...DATA_PERM,
     })),
   ],
   relocations: [],
   entry_points: [hex(dol.entryPoint)],
   entry_context: [],
 });
+
+/** Permissions Ghidra reports for the import: text r-x, data and BSS rw-. */
+const TEXT_PERM = { readable: true, writable: false, executable: true };
+const DATA_PERM = { readable: true, writable: true, executable: false };
 
 const checkNamed = (
   checks: readonly { readonly name: string; readonly matched: boolean }[],
@@ -214,6 +220,7 @@ describe("GameCube DOL load-image attestation", () => {
       source_file_index: null,
       file_offset: null,
       sha256: null,
+      ...DATA_PERM,
     });
 
     const result = attestGhidraDolLoadImage(
@@ -277,6 +284,115 @@ describe("GameCube DOL load-image attestation", () => {
         override,
       ),
     ).toMatchObject({ ok: true, value: { status: "mismatch" } });
+  });
+});
+
+const TEXT_ADDRESS = 0x8000_3100;
+
+/** Attest a correct import after one mutation of the observed mappings. */
+const attestMutated = async (
+  mutate: (mappings: NativeLoadImageObservation["mappings"]) => void,
+) => {
+  const bytes = overlappingDol();
+  const target = await dolTarget(bytes);
+  const observations = observationsFor(bytes, target.dol);
+  mutate(observations.mappings);
+  return attestedDol(
+    attestGhidraDolLoadImage(
+      snapshotOf(bytes, target),
+      target,
+      observations,
+      undefined,
+    ),
+  );
+};
+
+const blockCheck = (checks: DolImage["checks"], block: string, start: number) =>
+  checkNamed(checks, `block ${block} at ${hex(start)}`);
+
+describe("GameCube DOL block permissions and state", () => {
+  it("names the text block when its write permission is wrong", async () => {
+    const image = await attestMutated((mappings) => {
+      const text = mappings.find((m) => m.block === ".text0");
+      if (text === undefined) throw new Error("Missing text mapping");
+      text.writable = true;
+    });
+    expect(image.status).toBe("mismatch");
+    expect(blockCheck(image.checks, ".text0", TEXT_ADDRESS)).toMatchObject({
+      matched: false,
+      observed: expect.objectContaining({ writable: true, executable: true }),
+    });
+  });
+
+  it("names the data block when its write permission is missing", async () => {
+    const image = await attestMutated((mappings) => {
+      const data = mappings.find((m) => m.block === ".data0");
+      if (data === undefined) throw new Error("Missing data mapping");
+      data.writable = false;
+    });
+    expect(image.status).toBe("mismatch");
+    expect(blockCheck(image.checks, ".data0", DATA_ADDRESS)).toMatchObject({
+      matched: false,
+      observed: expect.objectContaining({ writable: false }),
+    });
+    expect(checkNamed(image.checks, "file_backed_mappings")).toMatchObject({
+      matched: false,
+    });
+  });
+
+  it("flags a BSS gap reported as an overlay", async () => {
+    const image = await attestMutated((mappings) => {
+      const gap = mappings.find((m) => m.block === "bss");
+      if (gap === undefined) throw new Error("Missing BSS mapping");
+      gap.overlay = true;
+    });
+    expect(image.status).toBe("mismatch");
+    expect(blockCheck(image.checks, "bss", BSS_ADDRESS)).toMatchObject({
+      matched: false,
+      observed: expect.objectContaining({ overlay: true }),
+    });
+    expect(checkNamed(image.checks, "bss_mappings")).toMatchObject({
+      matched: false,
+    });
+  });
+
+  it("flags a BSS gap that Ghidra did not load", async () => {
+    const image = await attestMutated((mappings) => {
+      const gap = mappings.find((m) => m.block === "bss");
+      if (gap === undefined) throw new Error("Missing BSS mapping");
+      gap.loaded = false;
+    });
+    expect(image.status).toBe("mismatch");
+    expect(blockCheck(image.checks, "bss", BSS_ADDRESS)).toMatchObject({
+      matched: false,
+      observed: expect.objectContaining({ loaded: false }),
+    });
+  });
+
+  it("flags a data mapping in a different address space", async () => {
+    const image = await attestMutated((mappings) => {
+      const data = mappings.find((m) => m.block === ".data0");
+      if (data === undefined) throw new Error("Missing data mapping");
+      data.address_space = "io";
+    });
+    expect(image.status).toBe("mismatch");
+    expect(blockCheck(image.checks, ".data0", DATA_ADDRESS)).toMatchObject({
+      matched: false,
+      observed: expect.objectContaining({ address_space: "io" }),
+    });
+  });
+
+  it("flags a text block that is not readable", async () => {
+    const image = await attestMutated((mappings) => {
+      const text = mappings.find((m) => m.block === ".text0");
+      if (text === undefined) throw new Error("Missing text mapping");
+      text.readable = false;
+    });
+    expect(image.status).toBe("mismatch");
+    expect(blockCheck(image.checks, ".text0", TEXT_ADDRESS)).toMatchObject({
+      matched: false,
+      observed: expect.objectContaining({ readable: false }),
+    });
   });
 });
 
