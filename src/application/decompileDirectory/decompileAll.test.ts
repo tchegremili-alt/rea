@@ -1003,7 +1003,7 @@ describe("decompile_all journal recovery", () => {
       expect.stringContaining("terminal call may cut the body"),
     );
     expect(limitations.at(-1)).toBe(
-      "33 further distinct per-item provider limitations were omitted from this answer; each function's file header or index failure record keeps the caveats of the observations it used.",
+      "33 further distinct per-item provider limitations were omitted from this answer; each function's record in decompile-index.json keeps the caveats of the observations it used.",
     );
     const last = await readFile(
       join(directory(), "functions/0x1130.c"),
@@ -1013,7 +1013,7 @@ describe("decompile_all journal recovery", () => {
     expect(last).toContain("terminal call at 0x1130");
   });
 
-  it("keeps the caveats a failed attempt used in its index record", async () => {
+  it("keeps the caveats each attempt used in its index record", async () => {
     const { tools } = harness({
       addressCaveats: true,
       fail: { "0x1000": "timeout", "0x2000": "empty" },
@@ -1026,7 +1026,55 @@ describe("decompile_all journal recovery", () => {
     expect((await indexRecord("0x2000"))?.limitations).toEqual([
       "info caveat at 0x2000",
     ]);
-    expect((await indexRecord("0x3000"))?.limitations).toBeUndefined();
+    expect((await indexRecord("0x3000"))?.limitations).toEqual([
+      "info caveat at 0x3000",
+      "terminal call may cut the body",
+      "terminal call at 0x3000",
+    ]);
+  });
+
+  it("keeps caveats beyond the header's length cap in the index", async () => {
+    const caveats = Array.from(
+      { length: 40 },
+      (_, index) =>
+        `terminal call at 0x${(0x1000 + index).toString(16)} ${"x".repeat(150)}`,
+    );
+    const port: AnalysisOperationPort = {
+      execute: (operation) =>
+        Promise.resolve(
+          ok(
+            operation === "list_procedures"
+              ? createAnalysisExecution(
+                  [{ address: "0x1000", value: "large" }],
+                  provider,
+                  { analysisProfile: profile, subject },
+                )
+              : operation === "procedure_info"
+                ? createAnalysisExecution(infoFor("0x1000"), provider, {
+                    analysisProfile: profile,
+                  })
+                : createAnalysisExecution(
+                    `int large(void) { ${sentinel} }`,
+                    provider,
+                    {
+                      analysisProfile: profile,
+                      limitations: caveats,
+                    },
+                  ),
+          ),
+        ),
+    };
+    const result = await new EnhancedTools(port).execute("decompile_all", {
+      output_directory: directory(),
+    });
+    expect(result.ok).toBe(true);
+    const header = await readFile(
+      join(directory(), "functions/0x1000.c"),
+      "utf8",
+    );
+    expect(header).toContain("// limitations_truncated: true");
+    expect(header).not.toContain(caveats.at(-1));
+    expect((await indexRecord("0x1000"))?.limitations).toEqual(caveats);
   });
 });
 

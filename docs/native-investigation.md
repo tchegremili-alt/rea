@@ -172,8 +172,9 @@ output directory, capped failure reasons, provider identity, and the
 analysis-profile digest. The manifest and `decompile-index.json` do not contain
 pseudocode. Each file records the provider name, canonical address, inclusive
 body ranges when `procedure_info` supplies them, and the `procedure_info` and
-pseudocode limitations for that function; a failed function's index record
-keeps the limitations of the observations it used. The returned Evidence keeps
+pseudocode limitations for that function, truncated after 4,000 characters.
+Each function's `decompile-index.json` record, written or failed, keeps the
+complete limitations of the observations it used. The returned Evidence keeps
 the eight most often observed distinct per-function provider limitations and
 counts the rest. A fresh output directory must not already exist. `--resume`
 continues an export for the same target SHA-256, provider, analysis profile,

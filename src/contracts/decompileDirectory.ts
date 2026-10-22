@@ -219,7 +219,7 @@ export const decompileDirectoryFunctionSchema = z.strictObject({
       message: z.string().min(1),
     })
     .optional(),
-  /** Provider caveats of the observations a failed attempt used. */
+  /** Complete provider caveats of the observations this attempt used. */
   limitations: z.array(z.string().min(1)).min(1).optional(),
 });
 
@@ -256,7 +256,7 @@ export const decompileJournalFunctionSchema = z.strictObject({
       message: z.string().min(1),
     })
     .optional(),
-  /** Provider caveats of the observations a failed attempt used. */
+  /** Complete provider caveats of the observations this attempt used. */
   limitations: z.array(z.string().min(1)).min(1).optional(),
 });
 

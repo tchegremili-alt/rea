@@ -624,11 +624,8 @@ const validFunctionRecord = (
     !isDecompileFunctionRelativePath(record.relative_path)
   )
     return false;
-  // A written file's header holds its caveats; only failures carry them here.
   return record.status === "written"
-    ? record.relative_path !== undefined &&
-        record.sha256 !== undefined &&
-        record.limitations === undefined
+    ? record.relative_path !== undefined && record.sha256 !== undefined
     : record.failure !== undefined;
 };
 

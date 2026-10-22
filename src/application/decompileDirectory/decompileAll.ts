@@ -379,9 +379,9 @@ const publishOne = async (input: {
   if (body.kind === "cancelled")
     return { result: err(body.error), bodySupport: input.bodySupport };
   if (body.kind === "unavailable") input.state.bodyUnavailable = true;
-  // Caveats of the observations this attempt used. A written file keeps them
-  // in its header and a failure record keeps them in the journal, so the
-  // bounded Evidence summary never holds the only copy.
+  // Caveats of the observations this attempt used. The journal record keeps
+  // the complete list, written or failed, so the bounded Evidence summary and
+  // the length-capped file header never hold the only copy.
   const infoCaveats = body.kind === "body" ? (body.limitations ?? []) : [];
   const decompiled = await input.analysis.execute(
     "procedure_pseudo_code",
@@ -488,6 +488,8 @@ const publishOne = async (input: {
     relative_path: relativePath,
     sha256: committed.sha256,
     body: bodyRecord(body.fact),
+    // The header may truncate; the journal keeps the complete list.
+    ...(caveats.length === 0 ? {} : { limitations: caveats }),
   });
   if (!appended.ok) return { result: appended, bodySupport: body.support };
   input.state.written += committed.status === "written" ? 1 : 0;

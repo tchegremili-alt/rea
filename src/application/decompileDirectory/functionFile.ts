@@ -73,7 +73,7 @@ const limitationLines = (limitations: readonly string[]): readonly string[] => {
     return [`// limitations: ${joined.length === 0 ? "none" : joined}`];
   return [
     `// limitations: ${joined.slice(0, 4_000)}`,
-    "// limitations_truncated: true",
+    "// limitations_truncated: true; decompile-index.json keeps the complete list",
   ];
 };
 
