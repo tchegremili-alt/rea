@@ -408,7 +408,96 @@ try {
     assert.deepEqual(await readFile(opaque), changed);
     cases++;
   }
+  // pwntools' kernel-image probe must not decide ordinary layout. A data
+  // marker, zero-fill above the decoder address-space limit and an undefined
+  // linux_banner reference are all valid profile input.
+  for (const [name, lines, flags] of [
+    [
+      "kernel-config-marker",
+      [
+        'static const char marker[] __attribute__((used)) = "IKCFG_ST";',
+        "int main(void) { return marker[0]; }",
+      ],
+      [],
+    ],
+    [
+      "large-zero-fill",
+      [
+        "char zero_fill[3221225473UL];",
+        "int main(void) { return zero_fill[7]; }",
+      ],
+      ["-mcmodel=large"],
+    ],
+    [
+      "kernel-banner-reference",
+      [
+        "extern const char linux_banner[];",
+        "const char *banner(void) { return linux_banner; }",
+      ],
+      ["-c"],
+    ],
+  ]) {
+    const probeSource = join(root.path, `${name}.c`);
+    const path = join(root.path, name);
+    await writeFile(probeSource, `${lines.join("\n")}\n`);
+    await execute("gcc", ["-O1", ...flags, probeSource, "-o", path], {
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+    const bytes = await readFile(path);
+    for (const mode of ["cli", "mcp"]) {
+      const value = await inspect(mode, path);
+      assert.equal(
+        value.artifact.sha256,
+        createHash("sha256").update(bytes).digest("hex"),
+      );
+      if (name === "kernel-config-marker")
+        assert.ok(bytes.includes(Buffer.from("IKCFG_ST")));
+      if (name === "large-zero-fill")
+        assert.ok(
+          value.sections.some(
+            (section) =>
+              section.type === "SHT_NOBITS" &&
+              BigInt(section.size) > 3221225472n,
+          ),
+        );
+      if (name === "kernel-banner-reference") {
+        const banner = value.symbols.find(
+          (symbol) => symbol.name.display === "linux_banner",
+        );
+        assert.equal(banner.section_index, "SHN_UNDEF");
+        assert.equal(banner.value, "0x0");
+        assert.equal(banner.value_meaning, "undefined");
+        assert.ok(
+          value.relocations.some(
+            (item) =>
+              item.symbol_table_index === banner.table_index &&
+              item.symbol_index === banner.entry_index,
+          ),
+        );
+      }
+      assert.deepEqual(await readFile(path), bytes);
+      cases++;
+    }
+  }
   const sectionBearingBytes = await readFile(join(root.path, "protected"));
+  // pyelftools seeks to e_phoff unchecked; a table beyond the snapshot is
+  // malformed input, not a decoder failure.
+  const programHeaderOverflow = Buffer.from(sectionBearingBytes);
+  programHeaderOverflow.writeBigUInt64LE(
+    programHeaderOverflow.readBigUInt64LE(32) | 0x8000000000000000n,
+    32,
+  );
+  const programHeaderOverflowPath = join(root.path, "program-header-overflow");
+  await writeFile(programHeaderOverflowPath, programHeaderOverflow);
+  for (const mode of ["cli", "mcp"]) {
+    await inspect(mode, programHeaderOverflowPath, "invalid_input");
+    assert.deepEqual(
+      await readFile(programHeaderOverflowPath),
+      programHeaderOverflow,
+    );
+    cases++;
+  }
   const dynamicSegment = protectedReport.segments.find(
     (segment) => segment.type === "PT_DYNAMIC",
   );
@@ -927,9 +1016,11 @@ try {
   sectionHeavy.writeUInt16LE(sectionCount, 60);
   const sectionHeavyPath = join(root.path, "section-heavy.o");
   await writeFile(sectionHeavyPath, sectionHeavy);
-  // pwntools materializes each PT_LOAD zero-filled tail during inspection.
-  // One allocation larger than the whole address-space budget fails promptly;
-  // a large section count instead races CPU work against the command deadline.
+  // Layout reports declared zero-fill without materializing it, so a tail
+  // larger than the address-space budget still succeeds. A large snapshot is
+  // held in memory as decoded bytes and a file mapping, so it reaches the same
+  // budget promptly. A large section count instead races CPU work against
+  // the command deadline.
   const memoryHeavy = Buffer.from(await readFile(join(root.path, "protected")));
   const memoryPhOffset = Number(memoryHeavy.readBigUInt64LE(32));
   const memoryPhSize = memoryHeavy.readUInt16LE(54);
@@ -947,9 +1038,20 @@ try {
     memoryHeavy.readBigUInt64LE(memorySizeOffset) + 128n * 1024n * 1024n,
     memorySizeOffset,
   );
-  const memoryHeavyPath = join(root.path, "memory-zero-tail");
-  await writeFile(memoryHeavyPath, memoryHeavy);
-  const memoryEnvironment = limitedEnvironment("--as=100663296");
+  const zeroTailPath = join(root.path, "memory-zero-tail");
+  await writeFile(zeroTailPath, memoryHeavy);
+  const largeSnapshot = Buffer.concat([
+    await readFile(join(root.path, "protected")),
+    Buffer.alloc(128 * 1024 * 1024),
+  ]);
+  const memoryHeavyPath = join(root.path, "memory-large-snapshot");
+  await writeFile(memoryHeavyPath, largeSnapshot);
+  // The snapshot alone exceeds the 96 MiB address space, so the memory failure
+  // does not depend on the interpreter's baseline footprint.
+  const memoryEnvironment = {
+    ...limitedEnvironment("--as=100663296"),
+    REA_PWNTOOLS_MAX_INPUT_BYTES: String(256 * 1024 * 1024),
+  };
   const memoryClient = new Client({
     name: "memory-layout-verifier",
     version: "1",
@@ -962,6 +1064,21 @@ try {
   });
   try {
     await memoryClient.connect(memoryTransport);
+    for (const mode of ["cli", "mcp"]) {
+      const value = await inspect(
+        mode,
+        zeroTailPath,
+        undefined,
+        memoryEnvironment,
+        memoryClient,
+      );
+      assert.equal(
+        value.segments[lastLoadIndex].memory_size,
+        `0x${memoryHeavy.readBigUInt64LE(memorySizeOffset).toString(16)}`,
+      );
+      assert.deepEqual(await readFile(zeroTailPath), memoryHeavy);
+      cases++;
+    }
     for (const mode of ["cli", "mcp"]) {
       const error = await inspect(
         mode,
@@ -980,7 +1097,7 @@ try {
       assert.ok(error.remediation.action.includes("memory"));
       cases++;
     }
-    assert.deepEqual(await readFile(memoryHeavyPath), memoryHeavy);
+    assert.deepEqual(await readFile(memoryHeavyPath), largeSnapshot);
   } finally {
     try {
       await memoryClient.close();

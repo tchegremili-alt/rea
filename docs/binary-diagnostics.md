@@ -69,6 +69,10 @@ uses isolated mode and an owned cache. Exact upstream profiles are recorded in
   are checked against snapshot size again at the public boundary. PT_NULL payload
   fields are unused: reported numbers remain, file backing is none and interpreted
   permissions are null. Segments with zero file size also have no file bytes.
+  Declared zero-fill is reported, not allocated.
+- The adapter skips pwntools' Linux kernel-image probe, so an `IKCFG_ST` data
+  string or an undefined `linux_banner` symbol leaves ordinary layout unchanged.
+  Kernel config, version and build are not reported.
 - Sectionless dynamic images still report dependency names with raw bytes and
   file locations where uniquely mapped. Missing symbol/relocation section tables
   do not establish that those runtime tables are absent.

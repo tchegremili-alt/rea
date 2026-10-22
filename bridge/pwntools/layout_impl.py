@@ -147,9 +147,37 @@ def inspect_elf(path, cache):
                 if names_header.sh_type != "SHT_STRTAB":
                     raise LayoutFailure("format", f"ELF section-name table {section_name_index} is not SHT_STRTAB.")
                 location(names_header.sh_offset, names_header.sh_size, len(content))
+            # pyelftools seeks to e_phoff without a range check, so validate the
+            # whole program-header table here, before upstream parsing reads it.
+            # Read PN_XNUM's real count from section zero's raw header; num_segments()
+            # would build section zero and resolve its name without the adapter's checks.
+            segment_count = headers.header.e_phnum if headers.header.e_phnum < 0xFFFF else headers._get_section_header(0).sh_info
+            if segment_count and not file_range(headers.header.e_phoff, segment_count * headers.header.e_phentsize, len(content)):
+                raise LayoutFailure("format", f"ELF program-header table of {segment_count} entries of {headers.header.e_phentsize} bytes at file offset {headers.header.e_phoff} lies outside the selected snapshot.")
         except ELFError as error:
             raise LayoutFailure("format", str(error)) from error
         class LayoutELF(ELF):
+            # pwntools' constructor also probes for a Linux kernel image. That
+            # probe scans memory images with zero-filled NOBITS ranges built in,
+            # assumes IKCFG_ST has a matching IKCFG_ED, and reads linux_banner
+            # through the derived symbol map. The layout never reports kernel
+            # config, version or build, so this adapter skips the probe.
+            # Ordinary marker bytes or symbol names then cannot change the result.
+            def __init__(self, path, checksec):
+                self._constructing = True
+                try:
+                    super().__init__(path, checksec=checksec)
+                finally:
+                    self._constructing = False
+
+            def search(self, needle, writable=False, executable=False):
+                if self._constructing:
+                    return iter(())
+                return super().search(needle, writable=writable, executable=executable)
+
+            def _populate_kernel_version(self):
+                pass
+
             def _get_section_name(self, header):
                 # SHN_UNDEF declares no names; upstream would otherwise read
                 # strings at the inactive section-zero offset.
