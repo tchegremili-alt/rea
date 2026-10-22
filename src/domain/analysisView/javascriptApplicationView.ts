@@ -3,6 +3,7 @@ import {
   type AnalysisInputIssue,
 } from "../analysisErrorCore.js";
 import type { AnalysisError } from "../analysisErrorBase.js";
+import { uniqueSorted } from "../canonicalOrdering.js";
 import { jsonObjectSchema, type JsonValue } from "../jsonValue.js";
 import type { JavaScriptApplicationAnalysisResult } from "../javascript/javascriptApplicationAnalysis.js";
 import type { ApplicationNode } from "../javascript/javascriptApplicationGraphSchemas.js";
@@ -217,16 +218,23 @@ const javascriptCoverageUnknowns = (
   return unknowns;
 };
 
+const javascriptApplicationLimitations = (
+  parent: AnalysisViewParent,
+  analysis: JavaScriptApplicationAnalysisResult,
+): string[] =>
+  uniqueSorted([
+    ...parent.limitations,
+    ...analysis.limitations,
+    ...analysis.graph.limitations,
+    ...analysis.semantic_graph.limitations,
+  ]);
+
 const parentFields = (
   parent: AnalysisViewParent,
   analysis: JavaScriptApplicationAnalysisResult,
   sourceCoverage: JavaScriptApplicationSourceCoverage,
 ) => {
-  const limitations = [
-    ...analysis.limitations,
-    ...analysis.graph.limitations,
-    ...analysis.semantic_graph.limitations,
-  ];
+  const limitations = javascriptApplicationLimitations(parent, analysis);
   return {
     parent_evidence_id: parent.evidenceId,
     parent_operation: "analyze_javascript_application" as const,
@@ -236,7 +244,7 @@ const parentFields = (
       sha256: analysis.root_artifact_sha256,
     },
     limitations: boundedViewMessages(
-      [...parent.limitations, ...limitations],
+      limitations,
       parent.evidenceId,
       "limitations",
     ),
@@ -384,7 +392,7 @@ export const projectJavaScriptApplicationView = (
           application_unknowns: sourceCoverage.application_unknown_count,
           semantic_unknowns: sourceCoverage.semantic_unknown_count,
         }),
-        limitation_count: analysis.limitations.length,
+        limitation_count: javascriptApplicationLimitations(parent, analysis).length,
       },
       coverage: completeCoverage(moduleCount, moduleCount),
       ...shared,
