@@ -784,6 +784,32 @@ it.each([
   },
 );
 
+it.each([
+  ["an unrelated", "/".repeat(1_000_000), { method: "GET", path: "/a" }],
+  [
+    "a path-descendant",
+    `/request/path${"/0".repeat(500_000)}`,
+    { method: "GET" },
+  ],
+])(
+  "indexes %s million-character facet pointer by its headline prefix only",
+  (_label, pointer, request) => {
+    const reported = nativePreview(
+      "mitmproxy",
+      { method: "GET", path: "/a" },
+      {
+        response: { http_version: "HTTP/1.1", reason: "OK" },
+        sidecars: [{ pointer, producer_type: "integer", literal: "1" }],
+      },
+    ).items[0]?.reported;
+    expect(reported).toEqual({
+      type: "http",
+      request,
+      response: { http_version: "HTTP/1.1", reason: "OK" },
+    });
+  },
+);
+
 it("keeps an unpaired-surrogate path out despite replacement-character bytes", () => {
   const reported = nativePreview(
     "mitmproxy",
