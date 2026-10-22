@@ -5,9 +5,12 @@ import {
   AnalysisCleanupLeaseGroup,
   AnalysisCleanupLease,
 } from "../artifacts/AnalysisCleanupLease.js";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { access, chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import type {
   Browser,
@@ -337,6 +340,104 @@ const acquireAttachedScenario = (
   });
 };
 
+const nonemptyEnvironmentValue = (
+  environment: Readonly<Record<string, string | undefined>>,
+  name: string,
+): string | undefined => {
+  const value = environment[name];
+  return value === undefined || value.length === 0 ? undefined : value;
+};
+
+/**
+ * Android's `/tmp` belongs to the shell user, so a Termux process cannot create
+ * a Chromium profile there. A caller-selected temp directory wins; otherwise
+ * the Termux prefix temp directory is the writable location.
+ */
+const androidScenarioTempDirectory = (
+  environment: Readonly<Record<string, string | undefined>>,
+): string | undefined => {
+  if (process.platform !== "android") return undefined;
+  const explicit = ["TMPDIR", "TMP", "TEMP"]
+    .map((name) => nonemptyEnvironmentValue(environment, name))
+    .find((value) => value !== undefined);
+  if (explicit !== undefined) return explicit;
+  const prefix = nonemptyEnvironmentValue(environment, "PREFIX");
+  return prefix === undefined ? undefined : join(prefix, "tmp");
+};
+
+/**
+ * Playwright 1.58.2 throws `Unsupported platform: android` while resolving
+ * its browser cache unless `PLAYWRIGHT_BROWSERS_PATH` is already set. The
+ * path is process-wide, so it is published once from the first writable
+ * Android temp directory and left for later launches.
+ */
+const publishAndroidPlaywrightBrowsersPath = async (
+  directory: string | undefined,
+): Promise<void> => {
+  if (
+    process.platform !== "android" ||
+    directory === undefined ||
+    nonemptyEnvironmentValue(process.env, "PLAYWRIGHT_BROWSERS_PATH") !==
+      undefined
+  )
+    return;
+  const browsersPath = join(directory, "ms-playwright");
+  await mkdir(browsersPath, { recursive: true });
+  process.env.PLAYWRIGHT_BROWSERS_PATH = browsersPath;
+};
+
+const TERMUX_CHROMIUM_WRAPPERS = new Set(["chromium", "chromium-browser"]);
+
+/**
+ * Termux's `chromium` and `chromium-browser` wrappers live in `$PREFIX/bin`.
+ * Chromium then looks for `icudtl.dat` next to that wrapper and exits. The
+ * real binary sits next to the ICU file in `$PREFIX/lib/chromium`. Other
+ * selected executables stay as the caller wrote them.
+ */
+const resolveAndroidChromiumExecutable = async (
+  executablePath: string,
+): Promise<string> => {
+  const resolved = resolve(executablePath);
+  if (process.platform !== "android") return executablePath;
+  if (!TERMUX_CHROMIUM_WRAPPERS.has(basename(resolved))) return executablePath;
+  const sibling = join(dirname(resolved), "..", "lib", "chromium", "chrome");
+  try {
+    await access(sibling, fsConstants.F_OK);
+    return sibling;
+  } catch {
+    return resolved;
+  }
+};
+
+const nodeOs = createRequire(import.meta.url)(
+  "node:os",
+) as typeof import("node:os");
+const androidLaunchTemp = new AsyncLocalStorage<string>();
+let androidTmpdirScoped = false;
+
+/**
+ * Playwright calls `os.tmpdir()` after an await. Publishing that directory
+ * through `process.env` makes every overlapping launch share one folder, and
+ * a queue makes one stuck startup block the rest. The lookup is scoped to the
+ * launch that is creating `playwright-artifacts-*`.
+ */
+const installAndroidTmpdirScope = (): void => {
+  if (androidTmpdirScoped) return;
+  androidTmpdirScoped = true;
+  const hostTmpdir = nodeOs.tmpdir;
+  nodeOs.tmpdir = () => androidLaunchTemp.getStore() ?? hostTmpdir();
+};
+
+const withAndroidHostTempDirectory = <Value>(
+  directory: string | undefined,
+  launch: () => Promise<Value>,
+): Promise<Value> => {
+  if (process.platform !== "android" || directory === undefined)
+    return launch();
+  installAndroidTmpdirScope();
+  return androidLaunchTemp.run(directory, launch);
+};
+
 const allowedBrowserEnvironment = (
   environment: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> => {
@@ -368,10 +469,17 @@ const allowedBrowserEnvironment = (
   // directory. Termux supplies an exec interceptor that rewrites those calls
   // through the system linker and removes itself for the launched program.
   // Playwright must retain it for its Chromium child process.
-  const prefix = environment.PREFIX;
-  if (prefix === undefined) return selected;
+  const prefix = nonemptyEnvironmentValue(environment, "PREFIX");
+  const temporaryDirectory = androidScenarioTempDirectory(environment);
+  const hasSelectedTemp =
+    selected.TMPDIR !== undefined && selected.TMPDIR.length > 0;
+  const withTemporaryDirectory =
+    temporaryDirectory === undefined || hasSelectedTemp
+      ? selected
+      : { ...selected, TMPDIR: temporaryDirectory };
+  if (prefix === undefined) return withTemporaryDirectory;
   return {
-    ...selected,
+    ...withTemporaryDirectory,
     LD_PRELOAD: `${prefix}/lib/libtermux-exec.so`,
     TERMUX_EXEC__PROC_SELF_EXE: process.execPath,
   };
@@ -822,6 +930,10 @@ export const openPlaywrightScenarioBrowser = async (
     readonly retainCleanup?: (lease: AnalysisCleanupLease) => void;
   } = {},
 ): Promise<OpenedScenarioBrowser> => {
+  if (scenario.browser.mode === "launch")
+    await publishAndroidPlaywrightBrowsersPath(
+      androidScenarioTempDirectory(environment),
+    );
   // Load Playwright only when a scenario opens; MCP startup stays off its module graph.
   const launcher =
     options.launcher ?? (await import("playwright-core")).chromium;
@@ -836,43 +948,60 @@ export const openPlaywrightScenarioBrowser = async (
       commandTimeoutMs,
     );
 
-  const profilePath = await mkdtemp(join(tmpdir(), "rea-browser-scenario-"));
+  const launchedBrowser = scenario.browser;
+  const preferredTemp = androidScenarioTempDirectory(environment);
+  if (preferredTemp !== undefined)
+    await mkdir(preferredTemp, { recursive: true });
+  const profilePath = await mkdtemp(
+    join(preferredTemp ?? tmpdir(), "rea-browser-scenario-"),
+  );
   let context: BrowserContext;
-  const executablePath = scenario.browser.executable_path;
+  const executablePath = await resolveAndroidChromiumExecutable(
+    launchedBrowser.executable_path,
+  );
   const headless = scenario.browser.headless;
   try {
     await chmod(profilePath, 0o700);
-    context = await withScenarioCommandDeadline(
-      () =>
-        launcher.launchPersistentContext(profilePath, {
-          executablePath,
-          headless,
-          acceptDownloads: false,
-          viewport: {
-            width: scenario.environment.viewport.width,
-            height: scenario.environment.viewport.height,
-          },
-          deviceScaleFactor: scenario.environment.viewport.device_scale_factor,
-          locale: scenario.environment.locale,
-          timezoneId: scenario.environment.timezone,
-          colorScheme: scenario.environment.color_scheme,
-          reducedMotion: scenario.environment.reduced_motion,
-          serviceWorkers: scenario.environment.service_workers,
-          env: allowedBrowserEnvironment(environment),
-          handleSIGHUP: false,
-          handleSIGINT: false,
-          handleSIGTERM: false,
-          timeout: commandTimeoutMs,
-          // Termux's Chromium cannot create its renderer process through Android's
-          // executable boundary. Single-process mode keeps the browser and page in
-          // the Termux-launched process so scenario navigation remains available.
-          args:
-            process.platform === "android"
-              ? ["--no-sandbox", "--single-process"]
-              : [],
-        }),
-      commandTimeoutMs,
-      "handshake",
+    context = await withAndroidHostTempDirectory(preferredTemp, () =>
+      withScenarioCommandDeadline(
+        () =>
+          launcher.launchPersistentContext(profilePath, {
+            executablePath,
+            headless,
+            acceptDownloads: false,
+            viewport: {
+              width: scenario.environment.viewport.width,
+              height: scenario.environment.viewport.height,
+            },
+            deviceScaleFactor:
+              scenario.environment.viewport.device_scale_factor,
+            locale: scenario.environment.locale,
+            timezoneId: scenario.environment.timezone,
+            colorScheme: scenario.environment.color_scheme,
+            reducedMotion: scenario.environment.reduced_motion,
+            serviceWorkers: scenario.environment.service_workers,
+            env: allowedBrowserEnvironment(environment),
+            handleSIGHUP: false,
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            timeout: commandTimeoutMs,
+            // Termux's Chromium cannot create its renderer process through Android's
+            // executable boundary. Single-process mode keeps the browser and page in
+            // the Termux-launched process so scenario navigation remains available.
+            // Android has no usable /dev/shm, so shared-memory files stay in the
+            // writable temp directory instead of failing the launch.
+            args:
+              process.platform === "android"
+                ? [
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--single-process",
+                  ]
+                : [],
+          }),
+        commandTimeoutMs,
+        "handshake",
+      ),
     );
   } catch (cause: unknown) {
     const cleanup = new AnalysisCleanupLease(async () => {
