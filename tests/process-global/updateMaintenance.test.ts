@@ -11,6 +11,7 @@ import {
   planIntegrationMaintenance,
 } from "../../src/application/UpdateMaintenance.js";
 import {
+  MAX_UPDATE_COMMAND_OUTPUT_BYTES,
   runUpdateCommand,
   UPDATE_COMMAND_OUTPUT_BYTES,
   systemUpdateHost,
@@ -445,6 +446,115 @@ describe("update subprocess boundaries", () => {
         packageRoot,
       }),
     ).resolves.toEqual(ok("3.3.0"));
+  });
+});
+
+describe("update subprocess output collection limits", () => {
+  it("terminates the subprocess and reports an explicit error when output exceeds the collection limit", async () => {
+    const result = await runUpdateCommand(
+      [
+        process.execPath,
+        "-e",
+        'process.stdout.write("x".repeat(3 * 1024 * 1024))',
+      ],
+      process.env,
+    );
+    expect(result).toEqual(
+      err(
+        `Update command output exceeded the collection limit of ${String(MAX_UPDATE_COMMAND_OUTPUT_BYTES)} bytes.`,
+      ),
+    );
+  });
+
+  it("terminates an endless stream and enforces the default output limit when omitted", async () => {
+    const script = [
+      'const chunk = "x".repeat(64 * 1024);',
+      "const write = () => {",
+      "  while (process.stdout.write(chunk));",
+      '  process.stdout.once("drain", write);',
+      "};",
+      "write();",
+    ].join(" ");
+    const result = await runUpdateCommand(
+      [process.execPath, "-e", script],
+      process.env,
+    );
+    expect(result).toEqual(
+      err(
+        `Update command output exceeded the collection limit of ${String(MAX_UPDATE_COMMAND_OUTPUT_BYTES)} bytes.`,
+      ),
+    );
+  });
+
+  it("enforces a custom collection limit when supplied", async () => {
+    const result = await runUpdateCommand(
+      [
+        process.execPath,
+        "-e",
+        'while(true) process.stdout.write("excessive output chunk ");',
+      ],
+      process.env,
+      "structured",
+      undefined,
+      1024,
+    );
+    expect(result).toEqual(
+      err("Update command output exceeded the collection limit of 1024 bytes."),
+    );
+  });
+
+  it("escalates to SIGKILL and reports the limit error when a child process ignores SIGTERM", async () => {
+    const script = [
+      'process.on("SIGTERM", () => {});',
+      'while (true) process.stdout.write("excessive output chunk ");',
+    ].join(" ");
+    const result = await runUpdateCommand(
+      [process.execPath, "-e", script],
+      process.env,
+      "structured",
+      undefined,
+      1024,
+      200,
+    );
+    expect(result).toEqual(
+      err("Update command output exceeded the collection limit of 1024 bytes."),
+    );
+  });
+
+  it("enforces the shared output budget across stdout and stderr when each stream is below the limit", async () => {
+    // 60 bytes on stdout and 50 bytes on stderr; neither stream exceeds the 100-byte limit alone,
+    // but the combined 110 bytes exceeds the shared budget.
+    const result = await runUpdateCommand(
+      [
+        process.execPath,
+        "-e",
+        'process.stdout.write("a".repeat(60)); process.stderr.write("b".repeat(50));',
+      ],
+      process.env,
+      "structured",
+      undefined,
+      100,
+    );
+    expect(result).toEqual(
+      err("Update command output exceeded the collection limit of 100 bytes."),
+    );
+  });
+
+  it("succeeds when combined stdout and stderr output totals exactly the configured limit", async () => {
+    // 60 bytes on stdout and 40 bytes on stderr total exactly 100 bytes.
+    const stdoutContent = "a".repeat(60);
+    const result = await runUpdateCommand(
+      [
+        process.execPath,
+        "-e",
+        `process.stdout.write(${JSON.stringify(stdoutContent)}); process.stderr.write("b".repeat(40));`,
+      ],
+      process.env,
+      "structured",
+      undefined,
+      100,
+    );
+    expect(result).toEqual(ok(stdoutContent));
   });
 });
 
