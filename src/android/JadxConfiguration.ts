@@ -595,34 +595,8 @@ const resolveJava = async (
       Object.entries(environment).find(
         ([key]) => key.toLowerCase() === "path",
       )?.[1] ?? "";
-    for (const directory of [process.cwd(), ...path.split(delimiter)]) {
-      throwIfJadxInterrupted(signal);
-      // Windows PATH commonly quotes individual entries containing spaces.
-      const selected =
-        directory.startsWith('"') && directory.endsWith('"')
-          ? directory.slice(1, -1)
-          : directory;
-      const candidate = resolve(selected, executable);
-      try {
-        await access(candidate, constants.R_OK | constants.X_OK);
-        if ((await stat(candidate)).isFile()) return await realpath(candidate);
-      } catch (cause: unknown) {
-        if (
-          typeof cause === "object" &&
-          cause !== null &&
-          "code" in cause &&
-          (cause.code === "ENOENT" || cause.code === "ENOTDIR")
-        )
-          continue;
-        throw configurationFailure(
-          "runtime_missing",
-          `Cannot inspect selected Java executable ${candidate}: ${errorText(cause)}`,
-          { java_executable: candidate },
-          "java_runtime",
-          cause,
-        );
-      }
-    }
+    const selected = await findWindowsPathJava(path, signal);
+    if (selected !== undefined) return selected;
     throw configurationFailure(
       "runtime_missing",
       "Cannot find java.exe on the selected Windows PATH. Select a full JDK with JAVA_HOME or PATH, then verify it with java --list-modules. REA does not install Java.",
@@ -638,6 +612,48 @@ const resolveJava = async (
     { java_home: environment.JAVA_HOME },
     "java_home",
   );
+};
+
+/**
+ * Find `java.exe` in the directories a Windows PATH value selects, in order.
+ * Unlike a CreateProcess search, the working directory is not consulted
+ * unless the caller lists it, so a stray `java.exe` there cannot shadow the
+ * selected JDK. Empty entries select nothing rather than the working directory.
+ */
+export const findWindowsPathJava = async (
+  path: string,
+  signal?: AbortSignal,
+): Promise<string | undefined> => {
+  for (const directory of path.split(delimiter)) {
+    throwIfJadxInterrupted(signal);
+    // Windows PATH commonly quotes individual entries containing spaces.
+    const selected =
+      directory.startsWith('"') && directory.endsWith('"')
+        ? directory.slice(1, -1)
+        : directory;
+    if (selected === "") continue;
+    const candidate = resolve(selected, "java.exe");
+    try {
+      await access(candidate, constants.R_OK | constants.X_OK);
+      if ((await stat(candidate)).isFile()) return await realpath(candidate);
+    } catch (cause: unknown) {
+      if (
+        typeof cause === "object" &&
+        cause !== null &&
+        "code" in cause &&
+        (cause.code === "ENOENT" || cause.code === "ENOTDIR")
+      )
+        continue;
+      throw configurationFailure(
+        "runtime_missing",
+        `Cannot inspect selected Java executable ${candidate}: ${errorText(cause)}`,
+        { java_executable: candidate },
+        "java_runtime",
+        cause,
+      );
+    }
+  }
+  return undefined;
 };
 
 const requireJavaHomeExecutable = async (

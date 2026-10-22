@@ -1,11 +1,12 @@
 import { ProviderCleanupError } from "../../../src/domain/providerCleanupError.js";
 import { createInspectionResources } from "../../fixtures/inspectionResources.js";
 import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { expect, it as test, onTestFinished } from "vitest";
 
 import {
+  findWindowsPathJava,
   inspectJadxAvailability as inspectAvailability,
   resolveJadxConfigurationInputs,
   validateJadxConfiguration,
@@ -550,3 +551,31 @@ it.each([
       expect(reason.cleanupIncomplete).toBe(true);
   },
 );
+
+test("selects java.exe from the Windows PATH, not the working directory", async () => {
+  const root = await createTestTempDirectory("rea-jadx-windows-path-");
+  const workingDirectory = join(root, "working");
+  const pathJdk = join(root, "jdk", "bin");
+  for (const directory of [workingDirectory, pathJdk]) {
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "java.exe"), "");
+    await chmod(join(directory, "java.exe"), 0o700);
+  }
+  const original = process.cwd();
+  process.chdir(workingDirectory);
+  onTestFinished(() => process.chdir(original));
+
+  // Empty entries, including a leading and trailing separator, select nothing.
+  const path = ["", pathJdk, ""].join(delimiter);
+  await expect(findWindowsPathJava(path)).resolves.toBe(
+    await realpath(join(pathJdk, "java.exe")),
+  );
+  await expect(findWindowsPathJava(`"${pathJdk}"`)).resolves.toBe(
+    await realpath(join(pathJdk, "java.exe")),
+  );
+  await expect(findWindowsPathJava(delimiter)).resolves.toBeUndefined();
+  // A caller who lists the working directory still selects it.
+  await expect(
+    findWindowsPathJava([".", pathJdk].join(delimiter)),
+  ).resolves.toBe(await realpath(join(workingDirectory, "java.exe")));
+});
