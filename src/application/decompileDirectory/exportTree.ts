@@ -10,6 +10,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -387,20 +388,40 @@ const missingOrRejected = async (
 const createPrivateDirectory = async (
   root: string,
 ): Promise<Result<void, AnalysisError>> => {
-  const created = await mkdir(root, { mode: 0o700 })
-    .then(() => chmod(root, 0o700))
-    .catch((cause: unknown) => cause);
-  if (created === undefined) return ok(undefined);
+  const created = await mkdir(root, { mode: 0o700 }).catch(
+    (cause: unknown) => cause,
+  );
+  if (created !== undefined)
+    return err(
+      nodeCode(created) === "EEXIST"
+        ? decompileInputError(
+            "output_directory",
+            "Output directory already exists. Pass resume to continue an export that matches this target and analysis profile.",
+          )
+        : decompileInputError(
+            "output_directory",
+            "The output directory could not be created.",
+          ),
+    );
+  // This call created the directory, so it owns removing it when the
+  // directory cannot be made private. Leaving it would block a fresh export
+  // and a resume alike, because no journal exists yet.
+  const secured = await chmod(root, 0o700).catch((cause: unknown) => cause);
+  if (secured === undefined) return ok(undefined);
+  // The directory is still empty, so a non-recursive removal fails closed on
+  // a path that another process filled meanwhile or replaced with a file or
+  // symlink.
+  const removed = await rmdir(root).then(
+    () => true,
+    () => false,
+  );
   return err(
-    nodeCode(created) === "EEXIST"
-      ? decompileInputError(
-          "output_directory",
-          "Output directory already exists. Pass resume to continue an export that matches this target and analysis profile.",
-        )
-      : decompileInputError(
-          "output_directory",
-          "The output directory could not be created.",
-        ),
+    decompileInputError(
+      "output_directory",
+      removed
+        ? "The output directory could not be secured."
+        : "The output directory could not be secured, and the directory this call created could not be removed. Remove it before retrying.",
+    ),
   );
 };
 

@@ -418,6 +418,24 @@ describe("decompile_all external functions", () => {
     expect(of(calls, "procedure_pseudo_code")).toEqual([]);
   });
 
+  it("reports a conflicting file at a written function's path when a resume finds it external", async () => {
+    expect((await run(harness().tools, directory())).ok).toBe(true);
+    await writeFile(join(directory(), "functions/0x2000.c"), "replaced\n");
+
+    const resumed = await run(
+      harness({ external: ["0x2000"] }).tools,
+      directory(),
+      { resume: true },
+    );
+
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value).toMatchObject({
+      counts: { requested: 1, skipped: 2, failed: 1, external: 0 },
+      failures: [{ address: "0x2000", code: "output_exists" }],
+    });
+  });
+
   it("resumes an import recorded as invalid pseudocode by an earlier version as external", async () => {
     const before = harness({ fail: { "0x2000": "null" } });
     expect((await run(before.tools, directory())).ok).toBe(true);
