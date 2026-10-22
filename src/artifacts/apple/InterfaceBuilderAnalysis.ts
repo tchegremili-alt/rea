@@ -25,7 +25,10 @@ import {
   InterfaceBuilderDecodeBudget,
   InterfaceBuilderDecodeBudgetExceeded,
 } from "./InterfaceBuilderDecodeBudget.js";
-import type { ArtifactEntry } from "../ArtifactReader.js";
+import {
+  ArtifactReaderFailure,
+  type ArtifactEntry,
+} from "../ArtifactReader.js";
 import {
   buildInterfaceBuilderAnalysis,
   interfaceBuilderLimitsSchema,
@@ -209,6 +212,11 @@ export const analyzeInterfaceBuilderBundle = async (input: {
         });
       } catch (cause: unknown) {
         if (input.signal?.aborted === true) throw cause;
+        // A read or identity failure means the selected bytes were never
+        // established, so it is not evidence of malformed archive content:
+        // preserve its typed reason for the artifact boundary instead of
+        // reporting the document as invalid.
+        if (cause instanceof ArtifactReaderFailure) throw cause;
         if (cause instanceof InterfaceBuilderDecodeBudgetExceeded) {
           // A document rejected while decoding, e.g. beyond the shared depth
           // limit, retains no representation; later documents keep its share.
