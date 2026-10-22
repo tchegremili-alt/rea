@@ -138,6 +138,7 @@ export type CliOutputArgumentValidation =
       readonly code:
         | "UNSUPPORTED_OUTPUT_COMBINATION"
         | "INVALID_OUTPUT_FILTER"
+        | "INVALID_TOKEN_WINDOW"
         | "MISSING_OUTPUT_VALUE";
       readonly message: string;
     };
@@ -245,9 +246,27 @@ const hasUnclosedFilterSlice = (expression: string): boolean => {
 export const validateCliOutputArguments = (
   arguments_: readonly string[],
 ): CliOutputArgumentValidation => {
-  const { filterOutput, format, missingValue, parseError, tokenWindow } =
-    parseCliOutputArguments(arguments_);
+  const {
+    filterOutput,
+    format,
+    missingValue,
+    parseError,
+    tokenWindow,
+    tokenLimit,
+    tokenOffset,
+  } = parseCliOutputArguments(arguments_);
   if (parseError) return { ok: true };
+  for (const [flag, value] of [
+    ["--token-limit", tokenLimit],
+    ["--token-offset", tokenOffset],
+  ] as const)
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0))
+      return {
+        ok: false,
+        format: format === "yaml" || format === "jsonl" ? format : "json",
+        code: "INVALID_TOKEN_WINDOW",
+        message: `${flag} requires a non-negative safe integer.`,
+      };
   if (filterOutput !== undefined && hasUnclosedFilterSlice(filterOutput))
     return {
       ok: false,
