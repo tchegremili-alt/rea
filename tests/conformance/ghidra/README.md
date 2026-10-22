@@ -46,6 +46,17 @@ binaries and Ghidra projects are never committed.
   The injection does not establish which natural inputs make the decompiler
   fail.
 
+- `ReaDecompilerWarningProvenanceProbe.java` adds caller-authored entry plate
+  comments to `decompiler-removed-block.S` in a real analysis database. Ghidra
+  renders the entry plate comment with the same header renderer as its own
+  warnings. The probe checks that a plate spelling a removal warning for a valid
+  in-body address, or for an unknown space, is not recorded as a removed block
+  and stays in `comments`, and that a plate repeating a real warning leaves
+  exactly the one real removal. Run `npm run build:cached`, then
+  `node scripts/verify-real-ghidra-warning-provenance.mjs` on Linux or macOS
+  (`REA_CLANG` selects the AArch64-capable clang). REA's tools cannot set plate
+  comments, so this lane drives the production bridge in-process.
+
 `scripts/verify-real-ghidra.mjs` uses `cc`, `clang`, and `lld-link` by default;
 `REA_CC`, `REA_CLANG`, and `REA_LLD_LINK` can select alternate commands. The
 verifier requires the verified bring-your-own Ghidra 12.1.4 installation through
