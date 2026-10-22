@@ -30,6 +30,8 @@ const noteKinds = new Map([
   [0x53494749, "NT_SIGINFO"],
   [0x46494c45, "NT_FILE"],
 ]);
+const LINUX_CORE_OWNER = Buffer.from("CORE\0");
+const OPAQUE_NOTE_KINDS: ReadonlyMap<number, string> = new Map();
 const matchesKind = (
   raw: number,
   reported: string | number,
@@ -121,14 +123,23 @@ export function validateRecordedCrashStructure(
     const raw = bytesAt(BigInt(note.location.offset), 12);
     if (
       BigInt(note.owner_location.bytes) !== BigInt(raw.readUInt32LE(0)) ||
-      BigInt(note.descriptor_location.bytes) !== BigInt(raw.readUInt32LE(4)) ||
-      !matchesKind(raw.readUInt32LE(8), note.type, noteKinds)
+      BigInt(note.descriptor_location.bytes) !== BigInt(raw.readUInt32LE(4))
     )
       fail();
     const owner = bytesAt(
       BigInt(note.owner_location.offset),
       raw.readUInt32LE(0),
     );
+    // Note types are owner-qualified: only the exact Linux CORE owner carries
+    // CORE names. Every other owner must report its original numeric type.
+    if (
+      !matchesKind(
+        raw.readUInt32LE(8),
+        note.type,
+        owner.equals(LINUX_CORE_OWNER) ? noteKinds : OPAQUE_NOTE_KINDS,
+      )
+    )
+      fail();
     const terminator = owner.indexOf(0);
     const display =
       owner.length === 0

@@ -26,7 +26,10 @@ note interpretation; an unspecified OSABI alone does not prove OS origin.
 - Original program headers and recorded segment file/memory ranges. Undumped
   memory and current executable/library identity remain unknown.
 - Every note's original identity, owner/descriptor bytes and source ranges,
-  including unfamiliar owners and note kinds.
+  including unfamiliar owners and note kinds. Note types are owner-qualified:
+  only exact Linux `CORE` notes receive symbolic names such as `NT_PRSTATUS` or
+  `NT_FILE`; every other owner, including `GNU` and `LINUX`, reports its
+  original numeric type.
 - Every exact Linux CORE PRSTATUS note as a separate recorded thread, with
   historical PID, signal and lossless uint64 registers bound to source bytes.
   Each supported note has exactly one interpretation; each thread contains the

@@ -119,7 +119,10 @@ def inspect_core(path, cache):
                 display = owner.split(b"\0", 1)[0].decode("utf-8", "replace") if owner else None
                 descriptor = content[descriptor_start:descriptor_start + note.n_descsz]
                 note_index = len(notes)
-                notes.append({"index": note_index, "segment_index": segment_index, "type": note.n_type,
+                # pyelftools names every ET_CORE note from the CORE table regardless of owner.
+                # Only the exact Linux CORE owner receives those names; others keep the raw type.
+                kind = note.n_type if owner == b"CORE\0" else int.from_bytes(content[position + 8:position + 12], "little")
+                notes.append({"index": note_index, "segment_index": segment_index, "type": kind,
                               "location": location(position, note_end - position, end),
                               "owner_location": location(owner_start, len(owner), end), "owner_bytes_base64": encoded(owner), "owner_display": display,
                               "descriptor_location": location(descriptor_start, len(descriptor), end), "descriptor_bytes_base64": encoded(descriptor)})

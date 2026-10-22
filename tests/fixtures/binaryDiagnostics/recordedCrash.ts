@@ -222,11 +222,13 @@ export const recordedCrashFixtureBytes = (value: RecordedCrash): Buffer => {
       start + 4,
     );
     bytes.writeUInt32LE(
-      note.type === "NT_PRSTATUS"
-        ? 1
-        : note.type === "NT_FILE"
-          ? 0x46494c45
-          : 0x53494749,
+      typeof note.type === "number"
+        ? note.type
+        : note.type === "NT_PRSTATUS"
+          ? 1
+          : note.type === "NT_FILE"
+            ? 0x46494c45
+            : 0x53494749,
       start + 8,
     );
     Buffer.from(note.owner_bytes_base64, "base64").copy(

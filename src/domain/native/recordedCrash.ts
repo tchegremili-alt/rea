@@ -17,7 +17,7 @@ const diagnostics = z.strictObject({
   truncated: z.boolean(),
 });
 // Exact b"CORE\0"; a lossy display label cannot establish the Linux note ABI.
-const LINUX_CORE_OWNER_BASE64 = "Q09SRQA=";
+export const LINUX_CORE_OWNER_BASE64 = "Q09SRQA=";
 
 /** Complete register identities in the supported Linux amd64 PRSTATUS ABI order. */
 const RECORDED_LINUX_AMD64_REGISTERS: readonly string[] = [
@@ -341,6 +341,12 @@ export const recordedCrashSchema = recordedCrashObjectSchema.superRefine(
       )
         fail("Note source ranges exceed their recorded segment.");
     }
+    for (const note of value.notes)
+      if (
+        typeof note.type === "string" &&
+        note.owner_bytes_base64 !== LINUX_CORE_OWNER_BASE64
+      )
+        fail("Only Linux CORE notes carry symbolic note types.");
     for (const padding of value.note_padding) {
       const segment = value.segments[padding.segment_index];
       if (
