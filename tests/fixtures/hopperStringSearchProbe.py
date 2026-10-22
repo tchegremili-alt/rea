@@ -76,6 +76,17 @@ def main():
     bridge["_api"] = lambda: API()
     bridge["_document"] = lambda name=None: document
 
+    # Record each record projection so the test can verify searches project
+    # only their matches rather than the whole cached inventory.
+    projections = []
+    inventory = bridge["_string_inventory"]
+
+    def recording_inventory(document, addresses=None):
+        projections.append(None if addresses is None else ["0x%x" % a for a in sorted(addresses)])
+        return inventory(document, addresses)
+
+    bridge["_string_inventory"] = recording_inventory
+
     table = {}
     for segment in document.getSegmentsList():
         for address, (display, raw, kind, _) in segment.strings.items():
@@ -103,8 +114,9 @@ def main():
     # Run the sequence twice: the second pass reuses the document caches.
     for _ in range(2):
         for pattern, case_sensitive in cases:
+            del projections[:]
             actual = bridge["_dispatch"]("search_strings", {"pattern": pattern, "case_sensitive": case_sensitive})
-            results.append({"pattern": pattern, "case_sensitive": case_sensitive, "actual": actual, "expected": expected(pattern, case_sensitive)})
+            results.append({"pattern": pattern, "case_sensitive": case_sensitive, "actual": actual, "expected": expected(pattern, case_sensitive), "projections": list(projections)})
     print(json.dumps(results))
 
 

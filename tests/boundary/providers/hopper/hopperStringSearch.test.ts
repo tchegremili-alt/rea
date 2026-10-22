@@ -18,6 +18,7 @@ const resultSchema = z.array(
     case_sensitive: z.boolean(),
     actual: z.array(z.object({ address: z.string() }).passthrough()),
     expected: z.array(z.object({ address: z.string() }).passthrough()),
+    projections: z.array(z.array(z.string()).nullable()),
   }),
 );
 
@@ -58,6 +59,16 @@ describe("Hopper string search", () => {
     ]);
     expect(byQuery("needle", true)).toEqual(["0x1010", "0x2000", "0x3040"]);
     expect(byQuery("zzz-absent", false)).toEqual([]);
+  });
+
+  it("builds the record inventory once and never reprojects it for matches", async () => {
+    const results = await runProbe();
+    const [cold, ...warm] = results;
+    // The first query builds the complete inventory needed for matching.
+    expect(cold?.projections).toEqual([null]);
+    for (const result of warm) {
+      expect(result.projections).toEqual([]);
+    }
   });
 
   it("preserves the decoding-unavailable record for an unreadable string", async () => {
