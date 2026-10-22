@@ -77,6 +77,7 @@ import { changedBehaviorResultSchema } from "../domain/changedBehavior.js";
 import { callPathResultSchema } from "../domain/callPathSchemas.js";
 import { staticRuntimeCorrelationResultSchema } from "../domain/staticRuntimeCorrelation.js";
 import { reconstructionVerificationResultSchema } from "../domain/reconstructionVerificationSchemas.js";
+import { decompileDirectoryManifestSchema } from "./decompileDirectory.js";
 import { analysisErrorProjectionSchema } from "./errorSchemas.js";
 import { relationshipCoverageSchema } from "../domain/relationshipCoverage.js";
 import { nativeDispatchMetadataResultSchema } from "../domain/native/objcSwiftMetadata.js";
@@ -312,6 +313,7 @@ export const enhancedOutputSchemas: Readonly<Record<string, z.ZodObject>> = {
   trace_native_ui_action: evidenceResultOf(nativeInvestigationTraceSchema),
   get_objc_classes: objcClassDiscoveryOutput,
   get_objc_protocols: symbolDiscoveryOutput("protocols"),
+  decompile_all: evidenceResultOf(decompileDirectoryManifestSchema),
   batch_decompile: evidenceResultOf(
     z.object({
       items: z.array(
