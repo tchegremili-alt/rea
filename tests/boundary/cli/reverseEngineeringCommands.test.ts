@@ -497,3 +497,156 @@ it("parses the Rizin inferior TTY as an option and passes it to the manager", as
     inferiorTty: "/dev/pts/7",
   });
 });
+
+const getRegisteredRizinRun = () => {
+  const commands = new Map<
+    string,
+    {
+      run(input: {
+        args: Record<string, unknown>;
+        options: Record<string, unknown>;
+      }): Promise<unknown>;
+    }
+  >();
+  const cli = {
+    command: (
+      name: string,
+      definition: {
+        run(input: {
+          args: Record<string, unknown>;
+          options: Record<string, unknown>;
+        }): Promise<unknown>;
+      },
+    ) => {
+      commands.set(name, definition);
+      return cli;
+    },
+  } as unknown as CliInstance;
+  registerReverseEngineeringCommands(cli, pino({ enabled: false }), {});
+  const command = commands.get(CLI_COMMANDS.debugWithRizin);
+  if (command === undefined)
+    throw new Error("Rizin CLI command was not registered");
+  return command;
+};
+
+const mockSuccessfulRizinExecution = () => {
+  const evidence = createEvidence(
+    undefined,
+    { id: "rizin.debugger", name: "Rizin debugger", version: null },
+    {
+      predicateType: "rea.debugger.command-observation",
+      operation: "rizin_debug_command",
+      parameters: { session_id: "session-1", command: "dr" },
+      result: { output: "registers" },
+      rawResult: { output: "registers" },
+    },
+  );
+  vi.spyOn(RizinDebugSessionManager.prototype, "start").mockResolvedValue(
+    ok({ session_id: "session-1", backend: null }),
+  );
+  vi.spyOn(RizinDebugSessionManager.prototype, "execute").mockResolvedValue(
+    ok({
+      evidence,
+      result: {
+        command: "dr",
+        output: "registers",
+        output_scope: "command_and_interleaved_session_output",
+        output_truncated: false,
+        completion_status: "complete",
+        backend: null,
+      },
+    }),
+  );
+  return evidence;
+};
+
+it("keeps success exit status when fallback cleanup confirms release after an incomplete initial close", async () => {
+  process.exitCode = 0;
+  const evidence = mockSuccessfulRizinExecution();
+  const incompleteClose = new AnalysisOutputError(
+    "close_rizin_debug_session",
+    "synthetic incomplete first stop",
+    {
+      cleanup: { reason: "synthetic stop pending", resources: ["session-1"] },
+    },
+  );
+  vi.spyOn(RizinDebugSessionManager.prototype, "close").mockResolvedValue(
+    err(incompleteClose),
+  );
+  const closeAll = vi
+    .spyOn(RizinDebugSessionManager.prototype, "closeAll")
+    .mockImplementation(async () => {
+      incompleteClose.resolveCleanup();
+    });
+  const command = getRegisteredRizinRun();
+
+  try {
+    const result = await command.run({
+      args: { path: "./sample.bin", command: "dr" },
+      options: { inferiorTty: "/dev/pts/7" },
+    });
+
+    expect(result).toBe(evidence);
+    expect(closeAll).toHaveBeenCalledOnce();
+    expect(incompleteClose.cleanupIncomplete).toBe(false);
+    expect(process.exitCode).toBe(0);
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it("keeps success exit status when the initial close and fallback cleanup both succeed", async () => {
+  process.exitCode = 0;
+  const evidence = mockSuccessfulRizinExecution();
+  vi.spyOn(RizinDebugSessionManager.prototype, "close").mockResolvedValue(
+    ok({ target_state: "unknown" }),
+  );
+  const closeAll = vi
+    .spyOn(RizinDebugSessionManager.prototype, "closeAll")
+    .mockResolvedValue(undefined);
+  const command = getRegisteredRizinRun();
+
+  try {
+    const result = await command.run({
+      args: { path: "./sample.bin", command: "dr" },
+      options: { inferiorTty: "/dev/pts/7" },
+    });
+
+    expect(result).toBe(evidence);
+    expect(closeAll).toHaveBeenCalledOnce();
+    expect(process.exitCode).toBe(0);
+  } finally {
+    vi.restoreAllMocks();
+  }
+});
+
+it("preserves failure exit status when fallback cleanup also fails", async () => {
+  process.exitCode = 0;
+  const evidence = mockSuccessfulRizinExecution();
+  const incompleteClose = new AnalysisOutputError(
+    "close_rizin_debug_session",
+    "synthetic incomplete first stop",
+    {
+      cleanup: { reason: "synthetic stop pending", resources: ["session-1"] },
+    },
+  );
+  vi.spyOn(RizinDebugSessionManager.prototype, "close").mockResolvedValue(
+    err(incompleteClose),
+  );
+  vi.spyOn(RizinDebugSessionManager.prototype, "closeAll").mockRejectedValue(
+    new Error("synthetic fallback cleanup failure"),
+  );
+  const command = getRegisteredRizinRun();
+
+  try {
+    const result = await command.run({
+      args: { path: "./sample.bin", command: "dr" },
+      options: { inferiorTty: "/dev/pts/7" },
+    });
+
+    expect(result).toBe(evidence);
+    expect(process.exitCode).toBe(1);
+  } finally {
+    vi.restoreAllMocks();
+  }
+});

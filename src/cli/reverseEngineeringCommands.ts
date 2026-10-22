@@ -419,22 +419,38 @@ export const registerReverseEngineeringCommands = (
               ? executed.value.evidence
               : projectAnalysisError(executed.error);
           } finally {
-            const closed =
-              sessionId === undefined
-                ? undefined
-                : await manager.close(sessionId);
-            if (closed !== undefined && !closed.ok) {
-              logger.error(
-                {
-                  command: CLI_COMMANDS.debugWithRizin,
-                  cleanup: projectAnalysisError(closed.error),
-                },
-                "Rizin cleanup failed after collecting command output",
-              );
-              process.exitCode = 1;
+            let cleanupFailed = false;
+            if (sessionId !== undefined) {
+              try {
+                const closed = await manager.close(sessionId);
+                cleanupFailed = !closed.ok;
+                if (!closed.ok)
+                  logger.error(
+                    {
+                      command: CLI_COMMANDS.debugWithRizin,
+                      cleanup: projectAnalysisError(closed.error),
+                    },
+                    "Rizin cleanup failed after collecting command output",
+                  );
+              } catch (cause) {
+                cleanupFailed = true;
+                logger.error(
+                  {
+                    command: CLI_COMMANDS.debugWithRizin,
+                    cleanup:
+                      cause instanceof Error
+                        ? cause.message
+                        : "Unknown cleanup failure",
+                  },
+                  "Rizin cleanup failed after collecting command output",
+                );
+              }
             }
-            await manager.closeAll().catch((cause: unknown) => {
-              process.exitCode = 1;
+            try {
+              await manager.closeAll();
+              cleanupFailed = false;
+            } catch (cause) {
+              cleanupFailed = true;
               logger.error(
                 {
                   command: CLI_COMMANDS.debugWithRizin,
@@ -445,7 +461,8 @@ export const registerReverseEngineeringCommands = (
                 },
                 "Rizin fallback cleanup failed",
               );
-            });
+            }
+            if (cleanupFailed) process.exitCode = 1;
           }
         }),
       ),
