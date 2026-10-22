@@ -2282,6 +2282,12 @@ export const gdbOneShotCommandMayInvalidateDetachProof = (
 
 /** @internal Classify commands that can invalidate the configured output sink. */
 export const commandMayChangeInferiorOutput = (command: string): boolean => {
+  // The exact read-only TTY queries ("show inferior-tty", MI
+  // "-inferior-tty-show") cannot reconfigure the sink, so they must not
+  // revoke the startup verification. Any other command that merely mentions
+  // the TTY setting keeps revoking (fail-closed).
+  if (/^\s*(?:show\s+inferior-tty|-inferior-tty-show)\s*$/iu.test(command))
+    return false;
   const setting = /^\s*(?:set|with)\s+(\S+)/iu.exec(command)?.[1];
   const maySetInferiorTty =
     setting !== undefined && "inferior-tty".startsWith(setting.toLowerCase());
