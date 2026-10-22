@@ -68,6 +68,12 @@ import {
   GHIDRA_PSP_LIMITATIONS,
 } from "./GhidraPspProfile.js";
 import { ghidraPspExtensionSchema } from "./GhidraPspExtension.js";
+import { ghidraEeExtensionSchema } from "./GhidraEeExtension.js";
+import {
+  GHIDRA_EE_LANGUAGE_ID,
+  GHIDRA_EE_LIMITATIONS,
+  isGhidraEeTarget,
+} from "./GhidraEeProfile.js";
 import {
   GHIDRA_MIPS_SOFT_FLOAT_STORAGE,
   ghidraMipsSoftFloatFailure,
@@ -162,6 +168,25 @@ export const createGhidraProviderClient = (input: {
         diagnostics: {
           reason:
             "Resolve the supported PSP profile and installed Allegrex extension before opening the session.",
+        },
+      }),
+    );
+  const ee = isGhidraEeTarget(target);
+  const eeExtension = ee
+    ? ghidraEeExtensionSchema.safeParse(
+        committedProfile.parameters.ee_extension,
+      )
+    : null;
+  if (
+    eeExtension !== null &&
+    (!eeExtension.success ||
+      committedProfile.parameters.language_id !== GHIDRA_EE_LANGUAGE_ID)
+  )
+    return err(
+      new ProviderAdapterError("ghidra", "open_binary", {
+        diagnostics: {
+          reason:
+            "Resolve the supported PlayStation 2 EE profile and installed ghidra-emotionengine-reloaded extension before opening the session.",
         },
       }),
     );
@@ -362,6 +387,9 @@ export const createGhidraProviderClient = (input: {
       ...(pspExtension?.success === true
         ? { pspExtension: pspExtension.data }
         : {}),
+      ...(eeExtension?.success === true
+        ? { eeExtension: eeExtension.data }
+        : {}),
       ...(softFloat ? { mipsSoftFloat: true as const } : {}),
       ...(target.format === "dos-mz" ? { dosMz: true } : {}),
       ...(target.format === "dos-com" ? { dosCom: true } : {}),
@@ -504,6 +532,7 @@ export const createGhidraProviderClient = (input: {
     ...providerLimitations,
     ...targetLimitations,
     ...(psp ? GHIDRA_PSP_LIMITATIONS : []),
+    ...(ee ? GHIDRA_EE_LIMITATIONS : []),
     ...softFloatLimitations,
     ...ghidraExtensionLimitations(extensions),
     ...seedLimitations,

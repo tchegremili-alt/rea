@@ -25,53 +25,96 @@ import {
 } from "../artifacts/ArtifactFileOperation.js";
 
 /** Installed processor code and data, distinct from REA's analysis-extension ABI. */
-export const ghidraPspExtensionSchema = z.strictObject({
-  id: z.literal("ghidra-allegrex"),
-  root: z.string().refine(isAbsolute),
-  ghidra_version: z.string().min(1),
-  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
-});
+export const ghidraProcessorExtensionSchema = <Id extends string>(
+  id: z.ZodLiteral<Id>,
+) =>
+  z.strictObject({
+    id,
+    root: z.string().refine(isAbsolute),
+    ghidra_version: z.string().min(1),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  });
+export const ghidraPspExtensionSchema = ghidraProcessorExtensionSchema(
+  z.literal("ghidra-allegrex"),
+);
 export type GhidraPspExtension = z.infer<typeof ghidraPspExtensionSchema>;
+
+/** One caller-installed processor extension REA fingerprints but never installs. */
+export interface GhidraProcessorExtensionSpec {
+  /** Directory and extension.properties name under Ghidra/Extensions. */
+  readonly id: string;
+  /** Short name used in failure messages. */
+  readonly label: string;
+  readonly failureCode: string;
+  readonly required: readonly string[];
+}
+export interface GhidraProcessorExtension {
+  readonly id: string;
+  readonly root: string;
+  readonly ghidra_version: string;
+  readonly sha256: string;
+}
+export const GHIDRA_PSP_EXTENSION: GhidraProcessorExtensionSpec = {
+  id: "ghidra-allegrex",
+  label: "Allegrex",
+  failureCode: "PSP_EXTENSION_UNAVAILABLE",
+  required: [
+    "Module.manifest",
+    "extension.properties",
+    "data/languages/allegrex.ldefs",
+    "data/languages/allegrex.sla",
+    "data/languages/allegrex.pspec",
+    "data/languages/allegrex.cspec",
+  ],
+};
 
 // Resource bounds for scanning a caller-installed extension, not target limits.
 const MAX_ENTRIES = 1024;
 const MAX_BYTES = 64 * 1024 * 1024;
 const MAX_DEPTH = 16;
-const REQUIRED = [
-  "Module.manifest",
-  "extension.properties",
-  "data/languages/allegrex.ldefs",
-  "data/languages/allegrex.sla",
-  "data/languages/allegrex.pspec",
-  "data/languages/allegrex.cspec",
-];
 
 /** Read-only fingerprint of all installed files; no home scanning or installation. */
-export const inspectGhidraPspExtension = async (
+export const inspectGhidraProcessorExtension = async (
+  spec: GhidraProcessorExtensionSpec,
   root: string,
   ghidraVersion: string,
   resources: ArtifactResourceScope,
   signal?: AbortSignal,
-): Promise<GhidraPspExtension> => {
+): Promise<GhidraProcessorExtension> => {
   try {
     return await resources.run(() =>
-      fingerprint(root, ghidraVersion, resources, signal),
+      fingerprint(spec, root, ghidraVersion, resources, signal),
     );
   } catch (cause: unknown) {
-    throw ghidraPspInspectionError(cause);
+    throw ghidraProcessorInspectionError(spec, cause);
   }
 };
 
-const fingerprint = async (
+export const inspectGhidraPspExtension = (
   root: string,
   ghidraVersion: string,
   resources: ArtifactResourceScope,
   signal?: AbortSignal,
-): Promise<GhidraPspExtension> => {
+): Promise<GhidraPspExtension> =>
+  inspectGhidraProcessorExtension(
+    GHIDRA_PSP_EXTENSION,
+    root,
+    ghidraVersion,
+    resources,
+    signal,
+  ) as Promise<GhidraPspExtension>;
+
+const fingerprint = async (
+  spec: GhidraProcessorExtensionSpec,
+  root: string,
+  ghidraVersion: string,
+  resources: ArtifactResourceScope,
+  signal?: AbortSignal,
+): Promise<GhidraProcessorExtension> => {
   assertArtifactReadActive(signal);
   if (!isAbsolute(root) || (await realpath(root)) !== root)
     throw new Error(
-      "The installed Allegrex directory must be a canonical non-symlink path.",
+      `The installed ${spec.label} directory must be a canonical non-symlink path.`,
     );
   const files: string[] = [];
   let entries = 1; // The root itself consumes one inventory entry.
@@ -79,12 +122,13 @@ const fingerprint = async (
     assertArtifactReadActive(signal);
     if (depth > MAX_DEPTH)
       throw new Error(
-        "Allegrex extension directory nesting exceeds the inspection limit.",
+        `${spec.label} extension directory nesting exceeds the inspection limit.`,
       );
     const path = join(root, relative);
     const metadata = await lstat(path);
     if (metadata.isDirectory()) {
       const children = await readChildren(
+        spec,
         path,
         MAX_ENTRIES - entries,
         resources,
@@ -101,15 +145,15 @@ const fingerprint = async (
       files.push(relative);
     } else
       throw new Error(
-        `Allegrex extension entries must be regular files or directories: ${relative}`,
+        `${spec.label} extension entries must be regular files or directories: ${relative}`,
       );
   };
   await visit("", 0);
-  for (const required of REQUIRED)
+  for (const required of spec.required)
     if (!files.includes(required))
-      throw new Error(`Missing installed Allegrex component: ${required}`);
+      throw new Error(`Missing installed ${spec.label} component: ${required}`);
   if (!files.some((path) => path.startsWith("lib/") && path.endsWith(".jar")))
-    throw new Error("The installed Allegrex extension has no loader JAR.");
+    throw new Error(`The installed ${spec.label} extension has no loader JAR.`);
   const hash = createHash("sha256");
   let bytesRead = 0;
   let properties = Buffer.alloc(0);
@@ -123,11 +167,11 @@ const fingerprint = async (
         before.size > MAX_BYTES - bytesRead
       )
         throw new Error(
-          "Allegrex extension bytes exceed the inspection limit.",
+          `${spec.label} extension bytes exceed the inspection limit.`,
         );
       if (relative === "extension.properties" && before.size > 65536)
         throw new Error(
-          "Allegrex extension properties exceed the inspection limit.",
+          `${spec.label} extension properties exceed the inspection limit.`,
         );
       hash.update(JSON.stringify([relative, before.size]));
       const buffer = Buffer.alloc(Math.min(65536, before.size + 1));
@@ -148,7 +192,7 @@ const fingerprint = async (
         offset += bytesRead;
         if (offset > before.size)
           throw new Error(
-            `Allegrex component changed during inspection: ${relative}`,
+            `${spec.label} component changed during inspection: ${relative}`,
           );
         const chunk = buffer.subarray(0, bytesRead);
         hash.update(chunk);
@@ -156,13 +200,13 @@ const fingerprint = async (
           chunks.push(Buffer.from(chunk));
       }
       if (offset !== before.size)
-        throw new Error(`Truncated Allegrex component: ${relative}`);
+        throw new Error(`Truncated ${spec.label} component: ${relative}`);
       if (
         !sameRegularFileState(before, await handle.stat()) ||
         !sameRegularFileState(before, await lstat(path))
       )
         throw new Error(
-          `Allegrex component changed during inspection: ${relative}`,
+          `${spec.label} component changed during inspection: ${relative}`,
         );
       bytesRead += before.size;
       if (relative === "extension.properties")
@@ -176,32 +220,30 @@ const fingerprint = async (
   );
   if (!parsedProperties.ok)
     throw new Error(
-      `Invalid Allegrex extension properties: ${parsedProperties.error}`,
+      `Invalid ${spec.label} extension properties: ${parsedProperties.error}`,
     );
   const property = (name: string): string | undefined =>
     parsedProperties.value.get(name);
-  if (
-    property("name") !== "ghidra-allegrex" ||
-    property("version") !== ghidraVersion
-  )
+  if (property("name") !== spec.id || property("version") !== ghidraVersion)
     throw new Error(
-      `Allegrex extension metadata does not match the selected Ghidra ${ghidraVersion}; install or rebuild a compatible extension.`,
+      `${spec.label} extension metadata does not match the selected Ghidra ${ghidraVersion}; install or rebuild a compatible extension.`,
     );
   assertArtifactReadActive(signal);
   return {
-    id: "ghidra-allegrex",
+    id: spec.id,
     root,
     ghidra_version: ghidraVersion,
     sha256: hash.digest("hex"),
   };
 };
 
-/** Resolve prerequisites before opening or admitting cached PSP analysis. */
-export const resolveGhidraPspExtension = async (
+/** Resolve prerequisites before opening or admitting cached extension-lane analysis. */
+export const resolveGhidraProcessorExtension = async (
+  spec: GhidraProcessorExtensionSpec,
   installation: GhidraInstallationInspection,
   resources: ArtifactResourceScope,
   signal?: AbortSignal,
-): Promise<Result<GhidraPspExtension, AnalysisError>> => {
+): Promise<Result<GhidraProcessorExtension, AnalysisError>> => {
   try {
     assertArtifactReadActive(signal);
     if (
@@ -210,16 +252,17 @@ export const resolveGhidraPspExtension = async (
       installation.architecture !== "x64"
     )
       throw new Error(
-        "The initial PSP profile requires a supported Linux x64 Ghidra installation.",
+        `The initial ${spec.label} profile requires a supported Linux x64 Ghidra installation.`,
       );
     const root = join(
       await realpath(installation.installDir),
       "Ghidra",
       "Extensions",
-      "ghidra-allegrex",
+      spec.id,
     );
     return ok(
-      await inspectGhidraPspExtension(
+      await inspectGhidraProcessorExtension(
+        spec,
         root,
         installation.providerVersion,
         resources,
@@ -227,17 +270,32 @@ export const resolveGhidraPspExtension = async (
       ),
     );
   } catch (cause: unknown) {
-    return err(ghidraPspInspectionError(cause));
+    return err(ghidraProcessorInspectionError(spec, cause));
   }
 };
 
+export const resolveGhidraPspExtension = (
+  installation: GhidraInstallationInspection,
+  resources: ArtifactResourceScope,
+  signal?: AbortSignal,
+): Promise<Result<GhidraPspExtension, AnalysisError>> =>
+  resolveGhidraProcessorExtension(
+    GHIDRA_PSP_EXTENSION,
+    installation,
+    resources,
+    signal,
+  ) as Promise<Result<GhidraPspExtension, AnalysisError>>;
+
 /** Preserve the producer's primary failure and its live cleanup dependencies. */
-const ghidraPspInspectionError = (cause: unknown): AnalysisError => {
+const ghidraProcessorInspectionError = (
+  spec: GhidraProcessorExtensionSpec,
+  cause: unknown,
+): AnalysisError => {
   if (cause instanceof AnalysisError) return cause;
   const cleanup =
     cause instanceof ArtifactReaderFailure ? cause.cleanup : undefined;
   const primary = artifactFilePrimaryFailure(cause);
-  const reason = `PSP_EXTENSION_UNAVAILABLE: ${primary instanceof Error ? primary.message : String(primary)} Use a compatible caller-installed ghidra-allegrex under GHIDRA_INSTALL_DIR/Ghidra/Extensions; REA does not install it.`;
+  const reason = `${spec.failureCode}: ${primary instanceof Error ? primary.message : String(primary)} Use a compatible caller-installed ${spec.id} under GHIDRA_INSTALL_DIR/Ghidra/Extensions; REA does not install it.`;
   const error =
     cause instanceof ArtifactReaderFailure && cause.reason === "cancelled"
       ? new AnalysisCancelledError("resolve_analysis_profile", {
@@ -260,6 +318,7 @@ const ghidraPspInspectionError = (cause: unknown): AnalysisError => {
 
 /** Close before descending, retaining the exact directory owner on uncertainty. */
 const readChildren = async (
+  spec: GhidraProcessorExtensionSpec,
   path: string,
   remainingEntries: number,
   resources: ArtifactResourceScope,
@@ -279,7 +338,7 @@ const readChildren = async (
       if (child === null) break;
       if (names.length >= remainingEntries)
         throw new Error(
-          "Allegrex extension inventory exceeds the inspection limit.",
+          `${spec.label} extension inventory exceeds the inspection limit.`,
         );
       names.push(child.name);
     }
@@ -300,11 +359,12 @@ const readChildren = async (
         : signal?.aborted
           ? new ArtifactReaderFailure(
               "cancelled",
-              "PSP inspection cancelled during directory close",
+              `${spec.label} inspection cancelled during directory close`,
               { cause: signal.reason },
             )
           : attempt.cause;
-    const error = ghidraPspInspectionError(
+    const error = ghidraProcessorInspectionError(
+      spec,
       ArtifactReaderFailure.withCleanup(
         primary,
         ArtifactReaderFailure.cleanupObservation(attempt.cause, path),
