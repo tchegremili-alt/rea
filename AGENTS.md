@@ -89,7 +89,7 @@ checks. Never claim runtime reproduction or measurements you did not perform.
 Use `NOT_ENOUGH_INFO` with an explanation for missing narrative answers or evidence.
 Incomplete reports, source-only findings, and early feature or design ideas are
 welcome when their limitations are explicit; a completed diagnosis or fix is not
-required to open an issue.
+required to open issues.
 
 ## Pull Request Readiness
 
@@ -99,7 +99,7 @@ and own the final diff, check the validation evidence and its limitations, and
 explicitly declare the PR ready for initial maintainer review.
 
 Keep the PR body concise and current, with the concrete problem, observable
-outcome, approach, and evidence. Report only checks that actually ran as executed;
+outcome, approach and evidence. Report only checks that actually ran as executed;
 distinguish source-derived conclusions, proposed checks, and unavailable coverage.
 Address actionable automated review findings and explain disagreements.
 
