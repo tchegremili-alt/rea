@@ -9,80 +9,204 @@ import { MCP_SHUTDOWN_FAILED } from "./messages.js";
 interface ShutdownCleanupOwner {
   readonly close: () => Promise<void>;
   closed: boolean;
+  attempted: boolean;
 }
 
-/** Own idempotent teardown of the transport handle, providers and session for any shutdown trigger. */
-export const createShutdown = (input: {
-  readonly handle: McpServerHandle;
+/**
+ * Resources transport startup adds to process shutdown. The handle is absent
+ * when a shutdown request stopped startup before the transport started.
+ */
+export interface McpTransportOwners {
+  readonly handle?: McpServerHandle;
   readonly closeAndroid?: () => Promise<void>;
   readonly closeOptionalProviders?: () => Promise<void>;
+}
+
+/**
+ * Own process shutdown from session creation onward. A shutdown request aborts
+ * `signal` so startup work stops, then closes every owner attached so far.
+ * Owners attached after a request are closed by `finish`. Process handlers stay
+ * registered until startup settles, so a repeated request during late cleanup
+ * joins or retries it instead of reaching default signal termination.
+ */
+export const createShutdown = (input: {
   readonly session: BinarySession;
   readonly dependencies: RuntimeDependencies;
   readonly serverLogger: Logger;
 }): {
+  readonly signal: AbortSignal;
+  readonly attachTransport: (owners: McpTransportOwners) => void;
   readonly shutdown: () => Promise<void>;
   readonly request: () => void;
+  readonly finish: () => Promise<0 | 1>;
+  readonly finishFailedOpen: () => Promise<0 | 1>;
+  readonly release: () => Promise<void>;
 } => {
-  const { handle, session, dependencies, serverLogger } = input;
+  const { session, dependencies, serverLogger } = input;
+  const requested = new AbortController();
   let shutdownAttempt: Promise<void> | undefined;
-  const cleanupOwners: ShutdownCleanupOwner[] = [
-    { close: () => handle.close(), closed: false },
-    ...(input.closeAndroid === undefined
-      ? []
-      : [{ close: input.closeAndroid, closed: false }]),
-    ...(input.closeOptionalProviders === undefined
-      ? []
-      : [{ close: input.closeOptionalProviders, closed: false }]),
-    {
-      close: async () => {
-        const closed = await session.close({ retainProviderDocuments: true });
-        if (!closed.ok) throw closed.error;
-      },
-      closed: false,
-    },
+  // Process shutdown keeps provider documents; a failed initial open's
+  // retained cleanup keeps its own policy, which closes them.
+  let retainProviderDocuments = true;
+  const cleanupOwners = [
+    sessionCleanupOwner(session, () => retainProviderDocuments),
   ];
+  // The attached transport's barrier before shared owners close.
+  let prepareShutdown: (() => Promise<void>) | undefined;
+  let startupSettled = false;
+  let lastAttemptFailed = false;
   let shutdownUnregistered = false;
   let unregisterShutdown = (): void => undefined;
+  const unregisterOnce = (): void => {
+    if (shutdownUnregistered) return;
+    unregisterShutdown();
+    shutdownUnregistered = true;
+  };
   const shutdown = async (): Promise<void> => {
     if (shutdownAttempt !== undefined) return shutdownAttempt;
+    requested.abort();
     const pending = cleanupOwners.filter(({ closed }) => !closed);
-    const attempt = (async () => {
-      // HTTP handlers can still own provider resources after cancellation.
-      // A failed drain keeps every shared owner available for a later retry.
-      await handle.prepareShutdown?.();
-      const results = await Promise.allSettled(
-        pending.map(async (owner) => {
-          await owner.close();
-          owner.closed = true;
-        }),
-      );
-      const failures: unknown[] = [];
-      for (const result of results)
-        if (result.status === "rejected") failures.push(result.reason);
-      if (failures.length === 1) throw failures[0];
-      if (failures.length > 1)
-        throw new AggregateError(
-          failures,
-          "Multiple MCP cleanup operations failed",
-        );
-      if (!shutdownUnregistered) {
-        unregisterShutdown();
-        shutdownUnregistered = true;
-      }
-    })();
-    shutdownAttempt = attempt;
-    void attempt.catch(() => {
-      if (shutdownAttempt === attempt) shutdownAttempt = undefined;
+    const attempt = drainThenClose(prepareShutdown, pending).then((failure) => {
+      lastAttemptFailed = failure !== undefined;
+      if (failure !== undefined) throw failure.cause;
+      if (startupSettled) unregisterOnce();
     });
+    shutdownAttempt = attempt;
+    // Settled attempts release the slot so a retry or a later-attached owner
+    // starts a new attempt; closed owners are never closed again.
+    const releaseSlot = (): void => {
+      if (shutdownAttempt === attempt) shutdownAttempt = undefined;
+    };
+    void attempt.then(releaseSlot, releaseSlot);
     return attempt;
   };
+  // A reported failure stays the outcome: a later retry that succeeds must not
+  // turn an observed shutdown failure into a successful exit.
+  let failureReported = false;
+  const reportShutdown = (): Promise<0 | 1> =>
+    shutdown().then(
+      () => (failureReported ? 1 : 0),
+      (cause: unknown) => {
+        failureReported = true;
+        reportMcpShutdownFailure(cause, dependencies, serverLogger);
+        return 1 as const;
+      },
+    );
   const requestShutdown = (): void => {
-    shutdown().catch((cause: unknown) => {
-      reportMcpShutdownFailure(cause, dependencies, serverLogger);
-    });
+    void reportShutdown();
+  };
+  const settleInFlight = async (): Promise<void> => {
+    await shutdownAttempt?.catch(() => undefined);
+  };
+  // Complete a requested shutdown, including owners attached after it began.
+  // A reported failure with no newer owner keeps its handlers for a retry.
+  const finish = async (): Promise<0 | 1> => {
+    await settleInFlight();
+    startupSettled = true;
+    if (lastAttemptFailed && cleanupOwners.every(({ attempted }) => attempted))
+      return 1;
+    return reportShutdown();
   };
   unregisterShutdown = dependencies.registerShutdown(requestShutdown);
-  return { shutdown, request: requestShutdown };
+  return {
+    signal: requested.signal,
+    attachTransport: (owners) => {
+      // A transport attached after a request is closed by `finish`.
+      if (!requested.signal.aborted) startupSettled = true;
+      const { handle } = owners;
+      prepareShutdown = handle?.prepareShutdown;
+      cleanupOwners.unshift(
+        ...[
+          handle === undefined ? undefined : () => handle.close(),
+          owners.closeAndroid,
+          owners.closeOptionalProviders,
+        ].flatMap((close) =>
+          close === undefined ? [] : [cleanupOwner(close)],
+        ),
+      );
+    },
+    shutdown,
+    request: requestShutdown,
+    finish,
+    // A failed initial open whose cleanup the session still retains: retry it
+    // with that open's non-retaining policy, here and on any later request.
+    finishFailedOpen: () => {
+      retainProviderDocuments = false;
+      return finish();
+    },
+    // Startup failed and closed its own resources; stop handling process events
+    // unless a shutdown that raced it failed and retains owners for a retry.
+    release: async () => {
+      await settleInFlight();
+      startupSettled = true;
+      if (!lastAttemptFailed) unregisterOnce();
+    },
+  };
+};
+
+/** Close the session under the retention policy current at each attempt. */
+const sessionCleanupOwner = (
+  session: BinarySession,
+  retainProviderDocuments: () => boolean,
+): ShutdownCleanupOwner =>
+  cleanupOwner(async () => {
+    // Explicit on every attempt: an omitted option keeps the policy an
+    // earlier attempt saved on the session's pending cleanup.
+    const closed = await session.close({
+      retainProviderDocuments: retainProviderDocuments(),
+    });
+    if (!closed.ok) throw closed.error;
+  });
+
+const cleanupOwner = (close: () => Promise<void>): ShutdownCleanupOwner => ({
+  close,
+  closed: false,
+  attempted: false,
+});
+
+/**
+ * Drain the transport, then close owners. HTTP handlers can still own provider
+ * resources after cancellation, so a failed drain closes nothing and keeps
+ * every owner for a later retry.
+ */
+const drainThenClose = async (
+  prepareShutdown: (() => Promise<void>) | undefined,
+  owners: readonly ShutdownCleanupOwner[],
+): Promise<{ readonly cause: unknown } | undefined> => {
+  try {
+    await prepareShutdown?.();
+  } catch (cause: unknown) {
+    // The attempt covered these owners even though none of them closed.
+    for (const owner of owners) owner.attempted = true;
+    return { cause };
+  }
+  return closeOwners(owners);
+};
+
+/** Close owners concurrently and return their combined failure, if any. */
+const closeOwners = async (
+  owners: readonly ShutdownCleanupOwner[],
+): Promise<{ readonly cause: unknown } | undefined> => {
+  for (const owner of owners) owner.attempted = true;
+  const results = await Promise.allSettled(
+    owners.map(async (owner) => {
+      await owner.close();
+      owner.closed = true;
+    }),
+  );
+  const failures = results.flatMap((result) =>
+    result.status === "rejected" ? [result.reason as unknown] : [],
+  );
+  if (failures.length === 0) return undefined;
+  return {
+    cause:
+      failures.length === 1
+        ? failures[0]
+        : new AggregateError(
+            failures,
+            "Multiple MCP cleanup operations failed",
+          ),
+  };
 };
 
 /** Preserve the same diagnostics for eager and deferred runtime owners. */
