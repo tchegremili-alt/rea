@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { TOOL_CONTRACTS } from "./toolContracts.js";
 import { FRIDA_KEEPALIVE_INTERVAL_DESCRIPTION } from "./fridaToolContracts.js";
 import { isValidFridaRemoteAddress } from "./fridaRemoteAddress.js";
+import { advertisedInputJsonSchema } from "./toolSchemaMetadata.js";
 
 const contract = (name: string) => {
   const found = TOOL_CONTRACTS.find((candidate) => candidate.name === name);
@@ -166,5 +167,45 @@ describe("Frida tool contracts", () => {
     expect(isValidFridaRemoteAddress("127.0.0.1:")).toBe(false);
     expect(isValidFridaRemoteAddress("frida-target/path")).toBe(false);
     expect(isValidFridaRemoteAddress("user@frida-target")).toBe(false);
+  });
+});
+
+describe("Frida remote address advertisement", () => {
+  it("advertises the character set so a projected schema agrees with canonical validation", () => {
+    const found = TOOL_CONTRACTS.find(
+      (candidate) => candidate.name === "list_frida_devices",
+    );
+    if (found === undefined) throw new Error("Missing list_frida_devices");
+    const projected = advertisedInputJsonSchema(found);
+    const remote = (projected["properties"] as Record<string, unknown>)[
+      "remote"
+    ] as Record<string, unknown>;
+    const address = (remote["properties"] as Record<string, unknown>)[
+      "address"
+    ] as Record<string, unknown>;
+    // A refine predicate does not project; only an advertised pattern does.
+    expect(typeof address["pattern"]).toBe("string");
+    const advertised = new RegExp(String(address["pattern"]), "u");
+
+    for (const accepted of [
+      "127.0.0.1:27042",
+      "frida-target.example",
+      "[::1]:27042",
+    ]) {
+      expect(advertised.test(accepted), accepted).toBe(true);
+      expect(isValidFridaRemoteAddress(accepted), accepted).toBe(true);
+    }
+    // Both validators reject these, so a schema-driven caller cannot build them.
+    for (const rejected of [
+      " ",
+      "frida target",
+      "user@frida-target",
+      "frida-target/path",
+      "frida-target?query=1",
+      "frida-target#fragment",
+    ]) {
+      expect(advertised.test(rejected), rejected).toBe(false);
+      expect(isValidFridaRemoteAddress(rejected), rejected).toBe(false);
+    }
   });
 });
