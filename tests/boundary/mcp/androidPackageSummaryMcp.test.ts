@@ -182,7 +182,7 @@ it("preserves partial/unknown declarations and Unicode text while rejecting miss
       hasSubject
         ? { path: "/original.apk", sha256: "a".repeat(64), format: "apk" }
         : undefined,
-      { id: "jadx", name: "JADX", version: "0.7.1" },
+      { id: "jadx", name: "JADX", version: "0.8.0" },
       {
         operation: "inspect_android_package",
         parameters: {},

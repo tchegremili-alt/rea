@@ -43,7 +43,7 @@ import {
   JADX_WINDOWS_NATIVE_REMEDIATION,
 } from "./JadxRelease.js";
 
-// Bound ZIP metadata allocation during discovery. The audited 0.7.1 JAR's
+// Bound ZIP metadata allocation during discovery. The audited 0.8.0 JAR's
 // central directory occupies 2,294,350 bytes; class bodies are not read here.
 const JAR_METADATA_READ_MAX_BYTES = 8 * 1024 * 1024;
 

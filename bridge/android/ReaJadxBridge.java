@@ -24,7 +24,7 @@ import kotlinx.coroutines.BuildersKt;
 import kotlinx.io.CoreKt;
 import kotlinx.io.JvmCoreKt;
 
-/** REA-owned metadata boundary for the unmodified jadx-headless-mcp 0.7.1 JAR. */
+/** REA-owned metadata boundary for the unmodified jadx-headless-mcp 0.8.0 JAR. */
 class ReaJadxBridge {
   private static final Gson JSON = new Gson();
   private final SessionHolder holder;

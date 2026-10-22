@@ -8,8 +8,8 @@ application code.
 
 - Source: <https://github.com/1013503897/jadx-headless-mcp>
 - Submodule: `third_party/jadx-headless-mcp`
-- Release: `v0.7.1`
-- Commit: `5844800a486d2248fa949b74c9896285f5b54de2`
+- Release: `v0.8.0`
+- Commit: `e9e14f155db9ff7d8b5330c1e1247a0860721c30`
 - License: Apache-2.0; see the submodule's `LICENSE`.
 - Release identity: `src/android/JadxRelease.ts`.
 - REA integration: `src/android/`; no upstream patches in this version.

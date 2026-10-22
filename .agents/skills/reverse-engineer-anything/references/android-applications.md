@@ -13,7 +13,7 @@ own APK path and explicit selectors; do not open a native session first.
 Choose an `overload_index` from the class inventory when methods are ambiguous
 instead of guessing.
 
-The provider requires a separately supplied headless JADX MCP JAR 0.7.1 and
+The provider requires a separately supplied headless JADX MCP JAR 0.8.0 and
 Java 17 or newer. `REA_JADX_MCP_JAR` selects the absolute JAR path; `JAVA_HOME`
 can select Java. REA setup does not install or configure that JAR, and doctor
 provider scopes cover Hopper/Ghidra rather than JADX. Use existing tools and

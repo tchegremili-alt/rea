@@ -159,7 +159,7 @@ test.each([
     errorCode: "execution_failure",
     serverName: "rea-jadx-bridge",
     serverVersion: JADX_BRIDGE_IDENTITY.version,
-    engineVersion: "0.7.1",
+    engineVersion: "0.8.0",
     calls: [
       { operation: "rea_jvm_status" },
       { operation: "load_apk" },
@@ -177,7 +177,7 @@ test.each([
     errorCode: "execution_failure",
     serverName: "rea-jadx-bridge",
     serverVersion: JADX_BRIDGE_IDENTITY.version,
-    engineVersion: "0.7.1",
+    engineVersion: "0.8.0",
     calls: [{ operation: "rea_jvm_status" }, { operation: "load_apk" }],
     containsAmbientEnvironment: true,
   },
