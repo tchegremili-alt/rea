@@ -72,7 +72,9 @@ export const registerDecompileDirectoryCommand = (
         .min(1)
         .max(DECOMPILE_DIRECTORY_MAX_LIMIT)
         .optional()
-        .describe("Maximum functions to attempt after skipping verified files"),
+        .describe(
+          "Maximum functions to attempt after skipping verified files and recorded external functions",
+        ),
       snapshot: z
         .string()
         .min(1)

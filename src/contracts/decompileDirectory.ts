@@ -49,6 +49,13 @@ const bodySchema = z.discriminatedUnion("available", [
   }),
 ]);
 
+/**
+ * written: a file holds the pseudocode. failed: no file, with a reason.
+ * external: procedure_info classifies the function as external. No file is
+ * written and no pseudocode is requested; the body fact is kept as observed.
+ */
+const functionStatusSchema = z.enum(["written", "failed", "external"]);
+
 const failureSchema = z.strictObject({
   address: z.string().min(1),
   name: z.string().nullable(),
@@ -76,7 +83,7 @@ export const decompileDirectoryInputSchema = z.strictObject({
     .boolean()
     .default(false)
     .describe(
-      "Continue a journal for the same target SHA-256, provider, analysis profile, and layout. Both digests must be known. Verified files are skipped, conflicting files are left unchanged, and functions not yet tried run before retries of recorded failures.",
+      "Continue a journal for the same target SHA-256, provider, analysis profile, and layout. Both digests must be known. Verified files and functions recorded as external are skipped, conflicting files are left unchanged, and functions not yet tried run before retries of recorded failures.",
     ),
   name: z
     .string()
@@ -113,7 +120,7 @@ export const decompileDirectoryInputSchema = z.strictObject({
     .max(DECOMPILE_DIRECTORY_MAX_LIMIT)
     .optional()
     .describe(
-      "Maximum functions to attempt on this call after skipping verified files. Further matches remain for a later resume.",
+      "Maximum functions to attempt on this call after skipping verified files and functions recorded as external. Further matches remain for a later resume.",
     ),
 });
 
@@ -146,8 +153,11 @@ export const decompileDirectoryManifestSchema = z
       requested: countSchema("Functions this call attempted."),
       written: countSchema("Function files created by this call."),
       failed: countSchema("Functions this call could not write."),
+      external: countSchema(
+        "Functions this call found procedure_info classifies as external. No file is written and no pseudocode is requested. A function without a matching procedure_info classification is decompiled as usual.",
+      ),
       skipped: countSchema(
-        "Selected functions whose existing files already hold the same bytes, whether recorded in the journal or found on disk.",
+        "Selected functions already settled: existing files that still hold the same bytes, whether recorded in the journal or found on disk, and functions the journal records as external.",
       ),
       remaining: countSchema(
         "Selected functions not attempted because the limit was reached.",
@@ -182,11 +192,11 @@ export const decompileDirectoryManifestSchema = z
   })
   .superRefine((manifest, context) => {
     const { counts } = manifest;
-    if (counts.written + counts.failed !== counts.requested)
+    if (counts.written + counts.failed + counts.external !== counts.requested)
       context.addIssue({
         code: "custom",
         path: ["counts", "requested"],
-        message: "requested must equal written plus failed",
+        message: "requested must equal written plus failed plus external",
       });
     if (
       counts.requested + counts.skipped + counts.remaining !==
@@ -209,7 +219,7 @@ export const decompileDirectoryManifestSchema = z
 export const decompileDirectoryFunctionSchema = z.strictObject({
   address: z.string().min(1),
   name: z.string().nullable(),
-  status: z.enum(["written", "failed"]),
+  status: functionStatusSchema,
   relative_path: z.string().min(1).optional(),
   sha256: digestSchema.optional(),
   body: bodySchema,
@@ -246,7 +256,7 @@ export const decompileJournalFunctionSchema = z.strictObject({
   kind: z.literal("function"),
   address: z.string().min(1),
   name: z.string().nullable(),
-  status: z.enum(["written", "failed"]),
+  status: functionStatusSchema,
   relative_path: z.string().min(1).optional(),
   sha256: digestSchema.optional(),
   body: bodySchema,

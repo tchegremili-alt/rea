@@ -97,6 +97,28 @@ const infoFor = (
   };
 };
 
+/** procedure_info for an import: Ghidra reports an observed body with no ranges. */
+const externalInfoFor = (address: string) => ({
+  ...infoFor(address),
+  basicblock_count: 0,
+  length: 0,
+  classification: {
+    external: true,
+    thunk: false,
+    thunk_target: null,
+    provenance: "fixture",
+  },
+  body: {
+    available: true as const,
+    provenance: "fixture",
+    ranges: [],
+    total_bytes: 0,
+    span_bytes: 0,
+    non_contiguous: false,
+    contains_entry: false,
+  },
+});
+
 const harness = (options?: {
   readonly procedures?: readonly Procedure[];
   readonly fail?: Readonly<
@@ -109,6 +131,8 @@ const harness = (options?: {
   readonly foreignTarget?: string;
   /** Per-address caveats, as Ghidra reports terminal calls. */
   readonly addressCaveats?: boolean;
+  /** Addresses procedure_info classifies as external, as Ghidra does for imports. */
+  readonly external?: readonly string[];
 }) => {
   const procedures = options?.procedures ?? [
     { address: "0x3000", name: "Bar::late" },
@@ -153,9 +177,13 @@ const harness = (options?: {
         if (options?.info === "error")
           return Promise.resolve(err(new AnalysisInputError(operation)));
         const address = String(parameters.procedure);
+        const info =
+          options?.external?.includes(address) === true
+            ? externalInfoFor(address)
+            : infoFor(address);
         return Promise.resolve(
           ok(
-            createAnalysisExecution(infoFor(address), provider, {
+            createAnalysisExecution(info, provider, {
               analysisProfile: profile,
               ...(options?.addressCaveats === true
                 ? { limitations: [`info caveat at ${address}`] }
@@ -334,6 +362,135 @@ describe("decompile_all manifest", () => {
     await expect(
       readFile(join(directory(), "functions/0x1000.c"), "utf8"),
     ).resolves.toContain(sentinel);
+  });
+});
+
+describe("decompile_all external functions", () => {
+  const directory = useOutputDirectory();
+
+  it("reports an external function as external without requesting its pseudocode", async () => {
+    const { calls, tools } = harness({ external: ["0x2000"] });
+    const result = await run(tools, directory());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toMatchObject({
+      counts: { requested: 3, written: 2, failed: 0, external: 1 },
+      failures: [],
+    });
+    expect(
+      of(calls, "procedure_pseudo_code").map((call) => call.procedure),
+    ).not.toContain("0x2000");
+    await expect(
+      readFile(join(directory(), "functions/0x2000.c")),
+    ).rejects.toThrow();
+    const index = decompileDirectoryIndexSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(directory(), DECOMPILE_DIRECTORY_INDEX_NAME),
+          "utf8",
+        ),
+      ),
+    );
+    expect(index.functions.find((entry) => entry.address === "0x2000")).toEqual(
+      {
+        address: "0x2000",
+        name: "Foo::helper",
+        status: "external",
+        body: { available: true, ranges: [], non_contiguous: false },
+      },
+    );
+  });
+
+  it("skips a recorded external function on resume without asking the provider again", async () => {
+    const { calls, tools } = harness({ external: ["0x1000", "0x2000"] });
+    expect((await run(tools, directory())).ok).toBe(true);
+    calls.length = 0;
+    const resumed = await run(tools, directory(), { resume: true, limit: 1 });
+
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    // A limit below the external count still finishes: nothing remains.
+    expect(resumed.value).toMatchObject({
+      counts: { requested: 0, skipped: 3, remaining: 0, external: 0 },
+    });
+    expect(of(calls, "procedure_info")).toEqual([]);
+    expect(of(calls, "procedure_pseudo_code")).toEqual([]);
+  });
+
+  it("resumes an import recorded as invalid pseudocode by an earlier version as external", async () => {
+    const before = harness({ fail: { "0x2000": "null" } });
+    expect((await run(before.tools, directory())).ok).toBe(true);
+    const journal = join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME);
+    const text = await readFile(journal, "utf8");
+    expect(text).toContain('"no_pseudocode"');
+    // The journal an earlier version wrote for the same import.
+    await writeFile(
+      journal,
+      text.replace(
+        /"code":"no_pseudocode","message":"[^"]*"/u,
+        '"code":"invalid_pseudocode","message":"The provider returned pseudocode that is not text."',
+      ),
+    );
+
+    const after = harness({ external: ["0x2000"] });
+    const resumed = await run(after.tools, directory(), { resume: true });
+
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.value).toMatchObject({
+      counts: { requested: 1, skipped: 2, failed: 0, external: 1 },
+      failures: [],
+    });
+    const index = decompileDirectoryIndexSchema.parse(
+      JSON.parse(
+        await readFile(
+          join(directory(), DECOMPILE_DIRECTORY_INDEX_NAME),
+          "utf8",
+        ),
+      ),
+    );
+    expect(
+      index.functions.find((entry) => entry.address === "0x2000")?.status,
+    ).toBe("external");
+  });
+
+  it.each([
+    ["a failure", '"failure":{"code":"x","message":"x"},'],
+    ["a file path", '"relative_path":"functions/0x2000.c",'],
+    ["a checksum", `"sha256":"${"cd".repeat(32)}",`],
+  ])(
+    "refuses to resume a journal whose external record carries %s",
+    async (_, field) => {
+      const { tools } = harness({ external: ["0x2000"] });
+      expect((await run(tools, directory())).ok).toBe(true);
+      const journal = join(directory(), DECOMPILE_DIRECTORY_JOURNAL_NAME);
+      const text = await readFile(journal, "utf8");
+      await writeFile(
+        journal,
+        text.replace('"status":"external",', `"status":"external",${field}`),
+      );
+
+      const resumed = await run(tools, directory(), { resume: true });
+
+      expect(resumed.ok).toBe(false);
+      if (resumed.ok) return;
+      expect(resumed.error).toBeInstanceOf(AnalysisInputError);
+      if (resumed.error instanceof AnalysisInputError)
+        expect(resumed.error.userMessage).toContain("not a compatible export");
+    },
+  );
+
+  it("reports a null pseudocode result as no pseudocode, not as text of the wrong type", async () => {
+    const { tools } = harness({ fail: { "0x2000": "null" } });
+    const result = await run(tools, directory());
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toMatchObject({
+      counts: { written: 2, failed: 1, external: 0 },
+      failures: [{ address: "0x2000", code: "no_pseudocode" }],
+    });
   });
 });
 

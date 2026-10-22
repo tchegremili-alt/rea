@@ -68,6 +68,8 @@ interface PublishState {
   attempted: number;
   written: number;
   failed: number;
+  /** Functions procedure_info classifies as external: not decompiled, no file. */
+  external: number;
   skipped: number;
   readonly failures: {
     readonly address: string;
@@ -114,6 +116,7 @@ export const decompileAll = async (
     attempted: 0,
     written: 0,
     failed: 0,
+    external: 0,
     skipped: 0,
     failures: [],
     bodyUnavailable: false,
@@ -308,6 +311,19 @@ const publishSelected = async (input: {
       }
       continue;
     }
+    // The journal header pins the target, provider and profile, so a
+    // recorded external classification still holds. Asking again would only
+    // spend the limit, and a limit below the external count would leave
+    // functions remaining on every resume.
+    // A conflicting or unreadable file at its reserved path is still reported
+    // below rather than hidden by the skip.
+    if (
+      existing === "write" &&
+      input.session.record(procedure.address)?.status === "external"
+    ) {
+      input.state.skipped += 1;
+      continue;
+    }
     if (input.limit !== undefined && input.state.attempted >= input.limit)
       continue;
     input.state.attempted += 1;
@@ -383,6 +399,18 @@ const publishOne = async (input: {
   // the complete list, written or failed, so the bounded Evidence summary and
   // the length-capped file header never hold the only copy.
   const infoCaveats = body.kind === "body" ? (body.limitations ?? []) : [];
+  // procedure_info classifies the function as external, so this target holds
+  // no code of its own to decompile. The record keeps the provider's body
+  // fact as observed; it is reported as external, not as a failure.
+  if (body.kind === "body" && body.external === true) {
+    input.state.external += 1;
+    return {
+      result: await input.session.append(
+        externalRecord(input.procedure, body.fact, infoCaveats),
+      ),
+      bodySupport: body.support,
+    };
+  }
   const decompiled = await input.analysis.execute(
     "procedure_pseudo_code",
     { procedure: input.procedure.address },
@@ -422,16 +450,7 @@ const publishOne = async (input: {
   ];
   const pseudocode = decompiled.value.result;
   if (typeof pseudocode !== "string" || pseudocode.length === 0) {
-    const reason = {
-      code:
-        typeof pseudocode === "string"
-          ? "empty_pseudocode"
-          : "invalid_pseudocode",
-      message:
-        typeof pseudocode === "string"
-          ? "The provider returned no pseudocode."
-          : "The provider returned pseudocode that is not text.",
-    };
+    const reason = pseudocodeFailure(pseudocode);
     recordFailure(input.state, input.procedure, reason);
     return {
       result: await input.session.append(
@@ -514,6 +533,11 @@ const readBody = async (
        * contributes none.
        */
       readonly limitations?: readonly string[];
+      /**
+       * procedure_info for this export classifies the function as external.
+       * Absent when the classification is unknown or not external.
+       */
+      readonly external?: true;
     }
   | {
       readonly kind: "unavailable";
@@ -572,12 +596,17 @@ const readBody = async (
       support,
       limitations: observed.value.limitations,
     };
+  const external =
+    parsed.data.classification?.external === true
+      ? { external: true as const }
+      : {};
   if (!parsed.data.body.available)
     return {
       kind: "body",
       fact: unavailableBody(parsed.data.body.reason),
       support,
       limitations: observed.value.limitations,
+      ...external,
     };
   return {
     kind: "body",
@@ -588,6 +617,7 @@ const readBody = async (
     },
     support,
     limitations: observed.value.limitations,
+    ...external,
   };
 };
 
@@ -707,6 +737,36 @@ const failureRecord = (
     : { limitations: [...options.limitations] }),
 });
 
+/** Why a successful pseudocode observation still produced no file. */
+const pseudocodeFailure = (pseudocode: unknown): FailureReason => {
+  if (pseudocode === null)
+    return {
+      code: "no_pseudocode",
+      message: "The provider returned null pseudocode for this function.",
+    };
+  return typeof pseudocode === "string"
+    ? {
+        code: "empty_pseudocode",
+        message: "The provider returned no pseudocode.",
+      }
+    : {
+        code: "invalid_pseudocode",
+        message: "The provider returned pseudocode that is not text.",
+      };
+};
+
+const externalRecord = (
+  procedure: SelectedProcedure,
+  body: FunctionBody,
+  limitations: readonly string[],
+): DecompileDirectoryFunctionRecord => ({
+  address: procedure.address,
+  name: procedure.name,
+  status: "external",
+  body: bodyRecord(body),
+  ...(limitations.length === 0 ? {} : { limitations: [...limitations] }),
+});
+
 const unavailableBody = (reason: string): FunctionBody => ({
   available: false,
   reason: reason.length === 0 ? "unavailable" : reason,
@@ -749,7 +809,8 @@ const manifestOf = (input: {
   readonly state: PublishState;
   readonly limitations: readonly string[];
 }) => {
-  const requested = input.state.written + input.state.failed;
+  const requested =
+    input.state.written + input.state.failed + input.state.external;
   const shown = input.state.failures.slice(
     0,
     DECOMPILE_DIRECTORY_INLINE_FAILURE_LIMIT,
@@ -765,6 +826,7 @@ const manifestOf = (input: {
       requested,
       written: input.state.written,
       failed: input.state.failed,
+      external: input.state.external,
       skipped: input.state.skipped,
       remaining: input.selected - input.state.skipped - requested,
     },

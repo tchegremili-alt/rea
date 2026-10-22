@@ -624,9 +624,16 @@ const validFunctionRecord = (
     !isDecompileFunctionRelativePath(record.relative_path)
   )
     return false;
-  return record.status === "written"
-    ? record.relative_path !== undefined && record.sha256 !== undefined
-    : record.failure !== undefined;
+  if (record.status === "written")
+    return record.relative_path !== undefined && record.sha256 !== undefined;
+  if (record.status === "failed") return record.failure !== undefined;
+  // An external function is not decompiled, so it owns no file and has no
+  // failure. Its body fact is kept as observed.
+  return (
+    record.relative_path === undefined &&
+    record.sha256 === undefined &&
+    record.failure === undefined
+  );
 };
 
 /** Resume needs both identities known. Two unknown digests are not a match. */
