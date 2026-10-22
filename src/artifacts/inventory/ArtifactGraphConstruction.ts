@@ -330,8 +330,15 @@ export const createArtifactEdges = (
     const sourcePath = isSourceMap
       ? occurrence.logical_path.slice(0, -".map".length)
       : undefined;
+    // A source map maps source code, never a directory container.
     const sourceCandidates =
-      sourcePath === undefined ? [] : (byPath.get(sourcePath) ?? []);
+      sourcePath === undefined
+        ? []
+        : (byPath.get(sourcePath) ?? []).filter(
+            (candidate) =>
+              candidate.artifact_kind !== "container" &&
+              candidate.entry_kind !== "directory",
+          );
     const mappedSource =
       sourceCandidates.length === 1 && sourceCandidates[0]?.artifact_id !== null
         ? sourceCandidates[0]

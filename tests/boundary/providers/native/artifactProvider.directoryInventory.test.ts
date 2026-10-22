@@ -70,6 +70,78 @@ describe("artifact directory inventory", () => {
       ]),
     );
   });
+
+  it("does not map a source map to a directory container and preserves parent/child containment", async () => {
+    const root = await createTestTempDirectory("rea-artifacts-");
+    const app = join(root, "Fixture.app");
+    const dirNamedJs = join(app, "Contents", "Resources", "main.js");
+    await mkdir(dirNamedJs, { recursive: true });
+    await writeFile(join(dirNamedJs, "child.js"), "child();\n");
+    await writeFile(join(app, "Contents", "Resources", "main.js.map"), "{}\n");
+
+    const client = new ArtifactProvider(process.env).createClient(
+      target(app, "directory"),
+    );
+    const result = await client.execute("inventory_artifact", {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    const inventory = artifactInventoryResultSchema.parse(result.value.result);
+    const dirOccurrence = inventory.occurrences.find(({ logical_path }) =>
+      logical_path.endsWith("Resources/main.js"),
+    );
+    const childOccurrence = inventory.occurrences.find(({ logical_path }) =>
+      logical_path.endsWith("Resources/main.js/child.js"),
+    );
+    const mapOccurrence = inventory.occurrences.find(({ logical_path }) =>
+      logical_path.endsWith("Resources/main.js.map"),
+    );
+    const resourcesOccurrence = inventory.occurrences.find(({ logical_path }) =>
+      logical_path.endsWith("Contents/Resources"),
+    );
+
+    expect(dirOccurrence?.artifact_kind).toBe("container");
+    expect(mapOccurrence?.artifact_kind).toBe("source-map");
+
+    expect(inventory.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relation: "contains",
+          parent_artifact_id: resourcesOccurrence?.artifact_id,
+          occurrence_id: dirOccurrence?.occurrence_id,
+        }),
+      ]),
+    );
+
+    expect(inventory.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relation: "contains",
+          parent_artifact_id: dirOccurrence?.artifact_id,
+          occurrence_id: childOccurrence?.occurrence_id,
+        }),
+      ]),
+    );
+
+    expect(inventory.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relation: "contains",
+          parent_artifact_id: resourcesOccurrence?.artifact_id,
+          occurrence_id: mapOccurrence?.occurrence_id,
+        }),
+      ]),
+    );
+
+    expect(inventory.edges).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relation: "maps-source",
+          parent_artifact_id: dirOccurrence?.artifact_id,
+        }),
+      ]),
+    );
+  });
 });
 
 const target = (

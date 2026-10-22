@@ -33,6 +33,9 @@ const entry = (path: string, kind: ArtifactEntry["kind"]): ArtifactEntry => ({
   adapterKey: path,
 });
 
+const contentId = (digit: string): string =>
+  artifactIdForContent(digit.repeat(64));
+
 describe("occurrence parent ownership", () => {
   it("selects the nearest unique nested parent", () => {
     const outer = createOccurrence(entry("a", "directory"), "a", null);
@@ -71,12 +74,39 @@ describe("occurrence parent ownership", () => {
       "unavailable",
     ]);
   });
+
+  it("resolves parent containment when a directory is named like a source file", () => {
+    const archive = createOccurrence(entry("app", "directory"), "app", null);
+    const directory = createOccurrence(
+      entry("app/main.js", "directory"),
+      "app/main.js",
+      null,
+    );
+    const child = createOccurrence(
+      entry("app/main.js/child.js", "file"),
+      "app/main.js/child.js",
+      null,
+    );
+    const sourceMap = createOccurrence(
+      entry("app/main.js.map", "file"),
+      "app/main.js.map",
+      null,
+    );
+    const occurrences = [archive, directory, child, sourceMap];
+
+    resolveOccurrenceParents(
+      occurrences,
+      indexOccurrencesByPath(occurrences),
+      new Set(),
+    );
+
+    expect(directory.parent_occurrence_id).toBe(archive.occurrence_id);
+    expect(child.parent_occurrence_id).toBe(directory.occurrence_id);
+    expect(sourceMap.parent_occurrence_id).toBe(archive.occurrence_id);
+  });
 });
 
 describe("source-map artifact relationships", () => {
-  const contentId = (digit: string): string =>
-    artifactIdForContent(digit.repeat(64));
-
   it.each([
     ["missing target", [] as string[], "contains"],
     ["unread target", ["unread"] as string[], "contains"],
@@ -130,6 +160,47 @@ describe("source-map artifact relationships", () => {
     },
   );
 
+  it("links a source map to a genuine source file named main.js", () => {
+    const archive = createOccurrence(entry("app", "directory"), "app", null);
+    archive.artifact_id = contentId("1");
+    const script = createOccurrence(
+      entry("app/main.js", "file"),
+      "app/main.js",
+      archive.occurrence_id,
+    );
+    script.artifact_id = contentId("2");
+    const sourceMap = createOccurrence(
+      entry("app/main.js.map", "file"),
+      "app/main.js.map",
+      archive.occurrence_id,
+    );
+    sourceMap.artifact_id = contentId("3");
+
+    const { edges, limitations } = createArtifactEdges(contentId("4"), [
+      archive,
+      script,
+      sourceMap,
+    ]);
+
+    expect(
+      edges.find(({ occurrence_id }) => occurrence_id === script.occurrence_id),
+    ).toMatchObject({
+      relation: "contains",
+      parent_artifact_id: contentId("1"),
+    });
+    expect(
+      edges.find(
+        ({ occurrence_id }) => occurrence_id === sourceMap.occurrence_id,
+      ),
+    ).toMatchObject({
+      relation: "maps-source",
+      parent_artifact_id: contentId("2"),
+    });
+    expect(limitations).toEqual([]);
+  });
+});
+
+describe("source-map directory targets", () => {
   it("keeps a directory named like a source map contained by its parent", () => {
     const archive = createOccurrence(entry("app", "directory"), "app", null);
     archive.artifact_id = contentId("1");
@@ -159,6 +230,64 @@ describe("source-map artifact relationships", () => {
     expect(
       edges.find(
         ({ occurrence_id }) => occurrence_id === directory.occurrence_id,
+      ),
+    ).toMatchObject({
+      relation: "contains",
+      parent_artifact_id: contentId("1"),
+    });
+    expect(limitations).toEqual([]);
+  });
+
+  it("keeps a directory named like a source file contained by its parent and avoids maps-source edges", () => {
+    const archive = createOccurrence(entry("app", "directory"), "app", null);
+    archive.artifact_id = contentId("1");
+    const directory = createOccurrence(
+      entry("app/main.js", "directory"),
+      "app/main.js",
+      archive.occurrence_id,
+    );
+    directory.artifact_id = contentId("2");
+    const child = createOccurrence(
+      entry("app/main.js/child.js", "file"),
+      "app/main.js/child.js",
+      directory.occurrence_id,
+    );
+    child.artifact_id = contentId("3");
+    const sourceMap = createOccurrence(
+      entry("app/main.js.map", "file"),
+      "app/main.js.map",
+      archive.occurrence_id,
+    );
+    sourceMap.artifact_id = contentId("4");
+
+    const { edges, limitations } = createArtifactEdges(contentId("5"), [
+      archive,
+      directory,
+      child,
+      sourceMap,
+    ]);
+
+    expect(directory).toMatchObject({
+      artifact_kind: "container",
+      artifact_format: "directory",
+    });
+    expect(
+      edges.find(
+        ({ occurrence_id }) => occurrence_id === directory.occurrence_id,
+      ),
+    ).toMatchObject({
+      relation: "contains",
+      parent_artifact_id: contentId("1"),
+    });
+    expect(
+      edges.find(({ occurrence_id }) => occurrence_id === child.occurrence_id),
+    ).toMatchObject({
+      relation: "contains",
+      parent_artifact_id: contentId("2"),
+    });
+    expect(
+      edges.find(
+        ({ occurrence_id }) => occurrence_id === sourceMap.occurrence_id,
       ),
     ).toMatchObject({
       relation: "contains",
