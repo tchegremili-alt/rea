@@ -16,12 +16,20 @@ export type ReferenceSourceEntryKind =
  */
 export type ReferenceSourceExclusionKind = ReferenceSourceEntryKind | "unknown";
 
-export interface ReferenceSourceReaderOptions {
-  readonly signal?: AbortSignal;
+/** Exclusions inherited only by descendants of the directory being read. */
+export interface ReferenceSourceExclusionPolicy {
+  /** Prepare once after directory admission, before any children are read. */
+  readonly prepareDirectory?: (
+    path: string,
+  ) => Promise<ReferenceSourceResult<ReferenceSourceExclusionPolicy>>;
   readonly shouldExclude?: (
     path: string,
     kind: ReferenceSourceExclusionKind,
   ) => boolean;
+}
+
+export interface ReferenceSourceReaderOptions extends ReferenceSourceExclusionPolicy {
+  readonly signal?: AbortSignal;
 }
 
 export type ReferenceSourceFailureCode =
@@ -88,6 +96,7 @@ export interface ReferenceSourceReaderError {
 
 export type PendingDirectory = {
   readonly path: string;
+  readonly exclusions: ReferenceSourceExclusionPolicy;
 };
 
 export type TraversalState = {
@@ -95,10 +104,6 @@ export type TraversalState = {
   readonly root: string;
   readonly rootIdentity: BigIntStats;
   readonly signal?: AbortSignal;
-  readonly shouldExclude?: (
-    path: string,
-    kind: ReferenceSourceExclusionKind,
-  ) => boolean;
   readonly entries: ReferenceSourceEntry[];
   readonly exclusions: Array<{
     readonly path: string;

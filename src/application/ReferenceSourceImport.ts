@@ -1,6 +1,7 @@
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 import {
   createHistoricalSourceGraph,
+  historicalSourceExclusionKey,
   historicalSourceInventoryHasPartialFacts,
   historicalSourceLanguages,
   historicalSourceManifests,
@@ -14,7 +15,6 @@ import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.j
 import type { AnalysisCleanupObservation } from "../domain/analysisErrorBase.js";
 import { readReferenceSource } from "../reference/ReferenceSourceReader.js";
 import type {
-  ReferenceSourceExclusionKind,
   ReferenceSourceRead,
   ReferenceSourceReaderError,
 } from "../reference/ReferenceSourceReaderTypes.js";
@@ -26,7 +26,7 @@ import type {
 } from "./ReferenceSourceImportTypes.js";
 import {
   prepareReferenceSourceImport,
-  type PreparedReferenceSourceImport,
+  resolveReferenceSourceRoot,
 } from "./ReferenceSourceImportPolicy.js";
 
 const failure = (
@@ -38,8 +38,27 @@ const failure = (
   message,
 });
 
+type ReferenceSourceImportPartial = NonNullable<
+  ReferenceSourceImportError["partial"]
+>;
+
+const withImportExclusions = (
+  partial: ReferenceSourceRead | undefined,
+  exclusions: HistoricalSourceGraphInput["exclusions"],
+  limitations: readonly string[] = [],
+): ReferenceSourceImportPartial | undefined =>
+  partial === undefined
+    ? undefined
+    : {
+        ...partial,
+        exclusions: sortExclusions(exclusions),
+        limitations: [
+          ...new Set([...partial.limitations, ...limitations]),
+        ].sort(compareUnicodeCodePoints),
+      };
+
 const cancelled = (
-  partial?: ReferenceSourceRead,
+  partial?: ReferenceSourceImportPartial,
 ): ReferenceSourceImportError => ({
   ...failure("cancelled", "Reference source import cancelled"),
   ...(partial === undefined ? {} : { partial }),
@@ -93,69 +112,12 @@ const buildProvenance = (
 const sortExclusions = (
   exclusions: HistoricalSourceGraphInput["exclusions"],
 ): HistoricalSourceGraphInput["exclusions"] =>
-  [...exclusions].sort((left, right) => {
-    const byPath = compareUnicodeCodePoints(left.path, right.path);
-    if (byPath !== 0) return byPath;
-    const byReason = compareUnicodeCodePoints(left.reason, right.reason);
-    if (byReason !== 0) return byReason;
-    return compareUnicodeCodePoints(
-      "pattern" in left ? left.pattern : "",
-      "pattern" in right ? right.pattern : "",
-    );
-  });
-
-const createShouldExclude =
-  (
-    exclusions: HistoricalSourceGraphInput["exclusions"],
-    secrets: PreparedReferenceSourceImport["secrets"],
-    ignored: PreparedReferenceSourceImport["ignored"],
-  ): ((path: string, kind: ReferenceSourceExclusionKind) => boolean) =>
-  (path, kind) => {
-    // An entry of unknown kind may be a directory, so directory-only rules
-    // must still exclude it; this fails closed for caller-marked secrets.
-    const patternPaths =
-      kind === "directory"
-        ? [`${path}/`]
-        : kind === "unknown"
-          ? [path, `${path}/`]
-          : [path];
-    const firstMatch = (matcher: typeof secrets) => {
-      const results = patternPaths.map((patternPath) =>
-        matcher.test(patternPath),
-      );
-      return results.find(({ ignored }) => ignored) ?? results[0];
-    };
-    const secretMatch = firstMatch(secrets);
-    if (secretMatch?.ignored === true) {
-      if (!secretMatch.rule)
-        throw new Error(`Ignored secret path has no matching rule: ${path}`);
-      exclusions.push({
-        path,
-        entry_kind: kind,
-        reason: "configured-secret",
-        pattern: secretMatch.rule.pattern,
-      });
-      return true;
-    }
-    const match = firstMatch(ignored);
-    if (match?.ignored !== true) return false;
-    if (!match.rule)
-      throw new Error(`Ignored path has no matching rule: ${path}`);
-    const reason = match.rule.mark;
-    if (
-      reason !== "project-ignored" &&
-      reason !== "default-ignored" &&
-      reason !== "caller-excluded"
-    )
-      throw new Error(`Ignored path has unknown rule origin: ${path}`);
-    exclusions.push({
-      path,
-      entry_kind: kind,
-      reason,
-      pattern: match.rule.pattern,
-    });
-    return true;
-  };
+  [...exclusions].sort((left, right) =>
+    compareUnicodeCodePoints(
+      historicalSourceExclusionKey(left),
+      historicalSourceExclusionKey(right),
+    ),
+  );
 
 /**
  * Import a reference source directory into a committed historical source graph.
@@ -169,38 +131,70 @@ export const importReferenceSource = async (
   resources: ArtifactResourceScope,
 ): Promise<Result<HistoricalSourceGraph, ReferenceSourceImportError>> => {
   if (isAborted(options.signal)) return err(cancelled());
-  const prepared = await prepareReferenceSourceImport(options, resources);
+  const exclusions: HistoricalSourceGraphInput["exclusions"] = [];
+  const canonicalRoot = await resolveReferenceSourceRoot(
+    options.root,
+    options.signal,
+  );
+  if (!canonicalRoot.ok) return canonicalRoot;
+  const vcsResult = await readReferenceSourceVcs(
+    canonicalRoot.value,
+    resources,
+    options.signal,
+  );
+  const prepared = await prepareReferenceSourceImport(
+    options,
+    resources,
+    exclusions,
+    vcsResult.ok ? vcsResult.value.ignoreCase : null,
+    canonicalRoot.value,
+  );
   if (!prepared.ok) return prepared;
-  const { ignored, root, secrets } = prepared.value;
+  const { root, policy } = prepared.value;
   if (isAborted(options.signal)) return err(cancelled());
 
-  const exclusions: HistoricalSourceGraphInput["exclusions"] = [];
-  const shouldExclude = createShouldExclude(exclusions, secrets, ignored);
-
-  const [readResult, vcsResult] = await Promise.all([
-    readReferenceSource(root, resources, {
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-      shouldExclude,
-    }),
-    readReferenceSourceVcs(root, resources, options.signal),
-  ]);
+  const readResult = await readReferenceSource(root, resources, {
+    ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...policy,
+  });
 
   if (!readResult.ok)
     return err(
       combineReadFailures(
         readResult.error,
         vcsResult.ok ? undefined : vcsResult.error,
-        readResult.error.partial,
+        withImportExclusions(
+          readResult.error.partial,
+          exclusions,
+          prepared.value.limitations,
+        ),
       ),
     );
   if (!vcsResult.ok)
     return err(
-      combineReadFailures(vcsResult.error, undefined, readResult.value),
+      combineReadFailures(
+        vcsResult.error,
+        undefined,
+        withImportExclusions(
+          readResult.value,
+          exclusions,
+          prepared.value.limitations,
+        ),
+      ),
     );
 
-  const vcs = vcsResult.value;
+  const vcs = vcsResult.value.info;
 
-  if (isAborted(options.signal)) return err(cancelled(readResult.value));
+  if (isAborted(options.signal))
+    return err(
+      cancelled(
+        withImportExclusions(
+          readResult.value,
+          exclusions,
+          prepared.value.limitations,
+        ),
+      ),
+    );
 
   const read = readResult.value;
   const filePaths = new Set(
@@ -212,7 +206,12 @@ export const importReferenceSource = async (
   const { entries, relationships, parseFailures, limitations } =
     parseReferenceSourceEntries(read, filePaths, options.signal);
 
-  if (isAborted(options.signal)) return err(cancelled(read));
+  if (isAborted(options.signal))
+    return err(
+      cancelled(
+        withImportExclusions(read, exclusions, prepared.value.limitations),
+      ),
+    );
 
   const uniqueRelationships = deduplicateRelationships(relationships);
   const uniqueFailures = normalizeHistoricalSourceParseFailures(parseFailures);
@@ -221,7 +220,10 @@ export const importReferenceSource = async (
     compareUnicodeCodePoints(left.path, right.path),
   );
   const sortedExclusions = sortExclusions(exclusions);
-  const sortedLimitations = [...limitations].sort(compareUnicodeCodePoints);
+  const sortedLimitations = [
+    ...limitations,
+    ...prepared.value.limitations,
+  ].sort(compareUnicodeCodePoints);
 
   const input: HistoricalSourceGraphInput = {
     schema: "HistoricalSourceGraph",
@@ -267,12 +269,8 @@ export const importReferenceSource = async (
 const combineReadFailures = (
   primary: ReferenceSourceReaderError,
   other: ReferenceSourceReaderError | undefined,
-  partial: ReferenceSourceRead | undefined,
+  partial: ReferenceSourceImportError["partial"],
 ): ReferenceSourceImportError => {
-  const code =
-    primary.code === "cancelled" || other?.code === "cancelled"
-      ? "cancelled"
-      : primary.code;
   const cleanup = mergeCleanup(primary.cleanup, other?.cleanup);
   const message =
     other === undefined
@@ -287,7 +285,7 @@ const combineReadFailures = (
           { cause: primary },
         );
   return {
-    ...failure(code, message),
+    ...failure(primary.code, message),
     ...(cleanup === undefined ? {} : { cleanup }),
     ...(partial === undefined ? {} : { partial }),
     ...(cause === undefined ? {} : { cause }),

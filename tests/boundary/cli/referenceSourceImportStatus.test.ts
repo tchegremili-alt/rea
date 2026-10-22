@@ -193,3 +193,60 @@ describe("compiled reference-source import preflight failures", () => {
     },
   );
 });
+
+cliTest.skipIf(process.platform === "win32")(
+  "retains the observed directory when its nested ignore policy is malformed",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-reference-cli-policy-");
+    await mkdir(join(root, "nested"));
+    const source = "export const observed = true;\n";
+    await Promise.all([
+      writeFile(join(root, "source.ts"), source),
+      writeFile(join(root, ".gitignore"), "ignored-before-failure.ts\n"),
+      writeFile(join(root, "ignored-before-failure.ts"), "excluded\n"),
+      writeFile(join(root, "nested/.gitignore"), new Uint8Array([0xff, 0xfe])),
+      writeFile(
+        join(root, "nested/unentered.ts"),
+        "export const hidden = 1;\n",
+      ),
+    ]);
+    const result = await cli.run({
+      arguments: ["import-reference-source", root, "--json"],
+      cwd: root,
+      environment: {
+        HOME: root,
+        USERPROFILE: root,
+        XDG_CONFIG_HOME: root,
+        XDG_CACHE_HOME: root,
+      },
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.json, result.stdout + result.stderr).toMatchObject({
+      error: "Import failed",
+      category: "execution_failure",
+      message: expect.stringContaining("UTF-8"),
+    });
+    expect(result.json).toHaveProperty("partial.entries", [
+      expect.objectContaining({
+        path: ".gitignore",
+        status: "read",
+        kind: "file",
+      }),
+      {
+        path: "nested",
+        status: "failed",
+        kind: "directory",
+        code: "io",
+        message: expect.stringContaining("UTF-8"),
+      },
+      expect.objectContaining({
+        path: "source.ts",
+        status: "read",
+        kind: "file",
+        size: Buffer.byteLength(source),
+        bytes: { type: "Buffer", data: Array.from(Buffer.from(source)) },
+      }),
+    ]);
+    expect(await readFile(join(root, "source.ts"), "utf8")).toBe(source);
+  },
+);

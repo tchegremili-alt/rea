@@ -10,7 +10,7 @@ const readVcs = (root: string, signal?: AbortSignal) =>
   withArtifactResourceScope(async (resources) => {
     const result = await readReferenceSourceVcs(root, resources, signal);
     if (!result.ok) throw result.error;
-    return result.value;
+    return result.value.info;
   });
 
 it("reads a linked worktree's own branch and detached HEAD through shared Git refs", async () => {

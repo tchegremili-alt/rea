@@ -57,12 +57,9 @@ const readSource = async (
     root: canonicalRoot,
     rootIdentity,
     ...(options.signal === undefined ? {} : { signal: options.signal }),
-    ...(options.shouldExclude === undefined
-      ? {}
-      : { shouldExclude: options.shouldExclude }),
     entries: [],
     exclusions: [],
-    pending: [{ path: canonicalRoot }],
+    pending: [{ path: canonicalRoot, exclusions: options }],
     bytesRead: 0,
   };
   const traversal = await traverse(state);

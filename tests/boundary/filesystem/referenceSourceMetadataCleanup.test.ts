@@ -123,7 +123,72 @@ it("retains failed .gitignore cleanup under the caller's scope", async () => {
   expect(close.calls()).toBe(3);
 });
 
-it("preserves Git metadata cleanup failure and the completed source read", async () => {
+it("retains Git config descriptor ownership when closing ignore metadata fails", async () => {
+  const root = await createTestTempDirectory("rea-reference-git-config-owner-");
+  await execFileOutput("git", ["init", "--initial-branch=main"], { cwd: root });
+  const path = join(root, ".git", "config");
+  const resources = new ArtifactResourceScope();
+  const close = failCloseUntilAllowed(path);
+  onTestFinished(async () => {
+    close.allow();
+    await resources.close().catch(() => undefined);
+  });
+
+  const result = await readReferenceSourceVcs(root, resources);
+  expect(result).toMatchObject({
+    ok: false,
+    error: {
+      code: "io",
+      cleanup: {
+        resources: [path],
+        reason: expect.stringContaining("injected metadata close failure"),
+      },
+    },
+  });
+  expect(close.calls()).toBe(2);
+
+  close.allow();
+  await resources.close();
+  expect(close.calls()).toBe(3);
+});
+
+it("preserves cancellation during the owned Git config read", async () => {
+  const root = await createTestTempDirectory(
+    "rea-reference-git-config-cancel-",
+  );
+  await execFileOutput("git", ["init", "--initial-branch=main"], { cwd: root });
+  const path = join(root, ".git", "config");
+  const controller = new AbortController();
+  const reason = new Error("cancel Git config observation");
+  const nativeOpen = actual.open;
+  openMock.mockImplementation(async (...args) => {
+    const handle = await nativeOpen(...args);
+    if (resolve(String(args[0])) !== resolve(path)) return handle;
+    const read = handle.read.bind(handle);
+    vi.spyOn(handle, "read").mockImplementation(async (...readArgs) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+      return read(...readArgs);
+    });
+    return handle;
+  });
+  const resources = new ArtifactResourceScope();
+  onTestFinished(() => resources.close());
+
+  const result = await readReferenceSourceVcs(
+    root,
+    resources,
+    controller.signal,
+  );
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected Git config cancellation");
+  expect(result.error.code).toBe("cancelled");
+  expect(result.error.cause).toMatchObject({
+    reason: "cancelled",
+    cause: reason,
+  });
+});
+
+it("blocks reference inventory while Git metadata cleanup remains pending", async () => {
   const root = await createTestTempDirectory("rea-reference-head-owner-");
   const repository = join(root, "repository");
   const sourceRoot = join(root, "source");
@@ -160,22 +225,13 @@ it("preserves Git metadata cleanup failure and the completed source read", async
         resources: [head],
         reason: expect.stringContaining("injected metadata close failure"),
       },
-      partial: {
-        entries: [
-          {
-            kind: "file",
-            path: "main.ts",
-            bytes: Buffer.from(bytes),
-          },
-        ],
-      },
     },
   });
-  expect(close.calls()).toBe(2);
+  expect(close.calls()).toBe(3);
 
   close.allow();
   await resources.close();
-  expect(close.calls()).toBe(3);
+  expect(close.calls()).toBe(4);
 });
 
 it("retains later packed-ref cleanup after an earlier loose-ref read failure", async () => {

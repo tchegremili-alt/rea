@@ -101,6 +101,7 @@ describe.skipIf(process.platform === "win32")(
               entry_kind: "file",
               reason: "project-ignored",
               pattern: "project.tmp",
+              policy_path: ".gitignore",
             },
             {
               path: "logs/application.log",
@@ -119,6 +120,76 @@ describe.skipIf(process.platform === "win32")(
         expect(graph.entries).toContainEqual(
           expect.objectContaining({ path: "source.ts", kind: "file" }),
         );
+      },
+    );
+  },
+);
+
+describe.skipIf(process.platform === "win32")(
+  "compiled nested reference-source exclusions",
+  () => {
+    cliTest(
+      "distinguishes root and nested policies excluding generated files and imports",
+      async ({ cli }) => {
+        const root = await createTestTempDirectory("rea-reference-nested-cli-");
+        await mkdir(join(root, "generated"));
+        await mkdir(join(root, "packages/widget/generated"), {
+          recursive: true,
+        });
+        await Promise.all([
+          writeFile(join(root, ".gitignore"), "/generated/\n"),
+          writeFile(
+            join(root, "generated/stale.js"),
+            'import "./missing.js";\n',
+          ),
+          writeFile(join(root, "packages/widget/.gitignore"), "/generated/\n"),
+          writeFile(join(root, "packages/widget/main.js"), "export {};\n"),
+          writeFile(
+            join(root, "packages/widget/generated/stale.js"),
+            'import "./missing.js";\n',
+          ),
+        ]);
+        const result = await cli.run({
+          arguments: ["import-reference-source", root, "--json"],
+          cwd: root,
+          environment: {
+            HOME: root,
+            USERPROFILE: root,
+            XDG_CONFIG_HOME: root,
+            XDG_CACHE_HOME: root,
+          },
+        });
+        expect(result.exitCode).toBe(0);
+        const graph = historicalSourceGraphSchema.parse(result.json);
+        expect(graph.exclusions).toEqual([
+          {
+            path: "generated",
+            entry_kind: "directory",
+            reason: "project-ignored",
+            pattern: "/generated/",
+            policy_path: ".gitignore",
+          },
+          {
+            path: "packages/widget/generated",
+            entry_kind: "directory",
+            reason: "project-ignored",
+            pattern: "/generated/",
+            policy_path: "packages/widget/.gitignore",
+          },
+        ]);
+        expect(
+          graph.entries.some(({ path }) =>
+            path.startsWith("packages/widget/generated"),
+          ),
+        ).toBe(false);
+        expect(graph.entries).toContainEqual(
+          expect.objectContaining({
+            path: "packages/widget/main.js",
+            kind: "file",
+            content_state: "hashed",
+          }),
+        );
+        expect(graph.relationships).toEqual([]);
       },
     );
   },

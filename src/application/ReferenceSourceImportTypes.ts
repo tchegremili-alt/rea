@@ -1,4 +1,5 @@
 import type { ReferenceSourcePolicy } from "../domain/referenceSourcePolicy.js";
+import type { HistoricalSourceGraphInput } from "../domain/referenceSourceGraph.js";
 import type { AnalysisCleanupObservation } from "../domain/analysisErrorBase.js";
 import type { ReferenceSourceRead } from "../reference/ReferenceSourceReaderTypes.js";
 
@@ -8,7 +9,10 @@ export interface ReferenceSourceImportError {
   readonly code: "cancelled" | "invalid-root" | "unsupported" | "io" | "parse";
   readonly message: string;
   readonly cleanup?: AnalysisCleanupObservation;
-  readonly partial?: ReferenceSourceRead;
+  readonly partial?: ReferenceSourceRead & {
+    /** Exclusions observed before a later traversal failure. */
+    readonly exclusions?: HistoricalSourceGraphInput["exclusions"];
+  };
   readonly cause?: unknown;
 }
 
@@ -43,6 +47,19 @@ const IMPORT_FAILURE_GUIDANCE = {
   { readonly category: string; readonly message: string }
 >;
 
+// Preserve bytes in Node Buffer JSON form without changing reader-owned data.
+const projectPartialRead = (partial: ReferenceSourceRead) => ({
+  ...partial,
+  entries: partial.entries.map((entry) =>
+    entry.status === "read" && entry.kind === "file"
+      ? {
+          ...entry,
+          bytes: { type: "Buffer" as const, data: Array.from(entry.bytes) },
+        }
+      : entry,
+  ),
+});
+
 /** Safe CLI projection for a historical-source import failure. */
 export const projectReferenceSourceImportError = (
   error: ReferenceSourceImportError,
@@ -50,7 +67,7 @@ export const projectReferenceSourceImportError = (
   category: string;
   message: string;
   cleanup?: AnalysisCleanupObservation;
-  partial?: ReferenceSourceRead;
+  partial?: ReturnType<typeof projectPartialRead>;
 }> => {
   const primary = IMPORT_FAILURE_GUIDANCE[error.code];
   const cleanupMessage =
@@ -61,7 +78,9 @@ export const projectReferenceSourceImportError = (
     category: primary.category,
     message: `${error.message} ${primary.message}${cleanupMessage}`,
     ...(error.cleanup === undefined ? {} : { cleanup: error.cleanup }),
-    ...(error.partial === undefined ? {} : { partial: error.partial }),
+    ...(error.partial === undefined
+      ? {}
+      : { partial: projectPartialRead(error.partial) }),
   };
 };
 

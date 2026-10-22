@@ -130,25 +130,45 @@ const parseFailureSchema = z.strictObject({
   reason: boundedTextSchema,
 });
 
-const exclusionSchema = z.discriminatedUnion("reason", [
-  z.strictObject({
-    path: relativePathSchema,
-    entry_kind: z
-      .enum(["file", "directory", "symlink", "other", "unknown"])
+const exclusionEntryShape = {
+  path: relativePathSchema,
+  entry_kind: z
+    .enum(["file", "directory", "symlink", "other", "unknown"])
+    .exactOptional(),
+};
+
+const projectIgnoredExclusionSchema = z
+  .strictObject({
+    ...exclusionEntryShape,
+    reason: z.literal("project-ignored"),
+    pattern: boundedTextSchema,
+    policy_path: relativePathSchema
+      .refine(
+        (path) => posix.basename(path) === ".gitignore",
+        "Expected a project .gitignore policy path",
+      )
       .exactOptional(),
-    reason: z.enum([
-      "configured-secret",
-      "project-ignored",
-      "default-ignored",
-      "caller-excluded",
-    ]),
+  })
+  .refine(
+    ({ path, policy_path: policyPath }) =>
+      policyPath === undefined ||
+      posix.dirname(policyPath) === "." ||
+      path.startsWith(`${posix.dirname(policyPath)}/`),
+    {
+      message: "Project exclusion must be within its policy directory scope",
+      path: ["policy_path"],
+    },
+  );
+
+const exclusionSchema = z.discriminatedUnion("reason", [
+  projectIgnoredExclusionSchema,
+  z.strictObject({
+    ...exclusionEntryShape,
+    reason: z.enum(["configured-secret", "default-ignored", "caller-excluded"]),
     pattern: boundedTextSchema,
   }),
   z.strictObject({
-    path: relativePathSchema,
-    entry_kind: z
-      .enum(["file", "directory", "symlink", "other", "unknown"])
-      .exactOptional(),
+    ...exclusionEntryShape,
     reason: z.enum(["symlink-escape", "unreadable"]),
   }),
 ]);
@@ -270,6 +290,12 @@ export const historicalSourceInventoryHasPartialFacts = (
 export const historicalSourceParseFailureKey = (
   failure: HistoricalSourceGraphInput["parse_failures"][number],
 ): string => `${failure.path}\u0000${failure.parser}\u0000${failure.reason}`;
+
+/** Stable identity used to sort and deduplicate source exclusion provenance. */
+export const historicalSourceExclusionKey = (
+  exclusion: HistoricalSourceGraphInput["exclusions"][number],
+): string =>
+  `${exclusion.path}\u0000${exclusion.reason}\u0000${"pattern" in exclusion ? exclusion.pattern : ""}\u0000${exclusion.reason === "project-ignored" ? (exclusion.policy_path ?? "") : ""}`;
 
 /** Stable identity used to sort and deduplicate source relationships. */
 export const historicalSourceRelationshipKey = (
@@ -468,10 +494,7 @@ function checkGraphInvariants(
     context,
   );
   checkSortedUnique(
-    graph.exclusions.map(
-      (exclusion) =>
-        `${exclusion.path}\u0000${exclusion.reason}\u0000${"pattern" in exclusion ? exclusion.pattern : ""}`,
-    ),
+    graph.exclusions.map(historicalSourceExclusionKey),
     "exclusions",
     context,
   );

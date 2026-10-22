@@ -88,9 +88,12 @@ describe.skipIf(process.platform === "win32")(
         const root = await createTestTempDirectory(
           "rea-reference-partial-summary-",
         );
+        await mkdir(join(root, "pkg"));
         await Promise.all([
-          writeFile(join(root, ".gitignore"), "ignored.txt\n"),
+          writeFile(join(root, ".gitignore"), "/ignored.txt\n"),
           writeFile(join(root, "ignored.txt"), "ignored\n"),
+          writeFile(join(root, "pkg/.gitignore"), "/ignored.txt\n"),
+          writeFile(join(root, "pkg/ignored.txt"), "nested ignored\n"),
           writeFile(join(root, "broken.js"), "export const = ;\n"),
         ]);
         const result = await cli.run({
@@ -108,15 +111,22 @@ describe.skipIf(process.platform === "win32")(
         expect(result.exitCode).toBe(0);
         expect(result.json).toMatchObject({
           inventory_state: "partial",
-          counts: { parse_failures: 1, exclusions: 1 },
+          counts: { parse_failures: 1, exclusions: 2 },
           exclusions: [
             {
               path: "ignored.txt",
               reason: "project-ignored",
-              pattern: "ignored.txt",
+              pattern: "/ignored.txt",
+              policy_path: ".gitignore",
+            },
+            {
+              path: "pkg/ignored.txt",
+              reason: "project-ignored",
+              pattern: "/ignored.txt",
+              policy_path: "pkg/.gitignore",
             },
           ],
-          outline: { depth: 0, entries: [], omitted_entry_count: 2 },
+          outline: { depth: 0, entries: [], omitted_entry_count: 4 },
         });
       },
     );

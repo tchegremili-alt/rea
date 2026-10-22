@@ -5,6 +5,7 @@ import {
   createHistoricalSourceGraph,
   createHistoricalSourceManifest,
   historicalSourceGraphSchema,
+  historicalSourceExclusionKey,
   historicalSourceParseFailureKey,
   parseHistoricalSourceGraph,
   parseHistoricalSourceManifest,
@@ -624,4 +625,162 @@ it("refuses an absolute POSIX internal target even when lexical joining would na
   expect(() => createHistoricalSourceGraph(input)).toThrow(
     /target path does not match its target state/u,
   );
+});
+
+describe("historical source graph exclusion provenance", () => {
+  const inputWithPolicy = (policyPath: string): HistoricalSourceGraphInput => ({
+    ...graphInput(),
+    inventory_state: "partial",
+    exclusions: [
+      {
+        path: "pkg/generated.js",
+        entry_kind: "file",
+        reason: "project-ignored",
+        pattern: "*.js",
+        policy_path: policyPath,
+      },
+    ],
+  });
+
+  it("commits the relative policy source and rejects a stale commitment", () => {
+    const root = createHistoricalSourceGraph(inputWithPolicy(".gitignore"));
+    const nested = createHistoricalSourceGraph(
+      inputWithPolicy("pkg/.gitignore"),
+    );
+    expect(parseHistoricalSourceGraph(nested)).toEqual(nested);
+    expect(nested.root_sha256).not.toBe(root.root_sha256);
+    expect(computeHistoricalSourceGraphSha256(nested)).not.toBe(
+      computeHistoricalSourceGraphSha256(root),
+    );
+    expect(createHistoricalSourceManifest(nested).manifest_id).not.toBe(
+      createHistoricalSourceManifest(root).manifest_id,
+    );
+    expect(() =>
+      parseHistoricalSourceGraph({ ...root, exclusions: nested.exclusions }),
+    ).toThrow(/root commitment/u);
+  });
+
+  it.each([
+    "../.gitignore",
+    "/pkg/.gitignore",
+    "pkg//.gitignore",
+    "pkg/../.gitignore",
+    "pkg/./.gitignore",
+    "pkg/.gitignore/",
+    "pkg/\0.gitignore",
+    "pkg/.gitignore-extra",
+    "pkg/nested/.gitignore",
+    "other/.gitignore",
+    "pk/.gitignore",
+  ])("rejects an unsafe, non-policy, or unrelated policy path %j", (path) => {
+    expect(() => createHistoricalSourceGraph(inputWithPolicy(path))).toThrow();
+  });
+
+  it("does not let a nested policy claim exclusion of its own directory", () => {
+    const input = inputWithPolicy("pkg/.gitignore");
+    input.exclusions[0] = { ...input.exclusions[0]!, path: "pkg" };
+    expect(() => createHistoricalSourceGraph(input)).toThrow(/scope/u);
+  });
+
+  it.each([
+    "configured-secret",
+    "default-ignored",
+    "caller-excluded",
+    "unreadable",
+    "symlink-escape",
+  ])("rejects a policy source for %s exclusions", (reason) => {
+    const input = inputWithPolicy("pkg/.gitignore");
+    expect(() =>
+      createHistoricalSourceGraph({
+        ...input,
+        exclusions: input.exclusions.map((entry) => ({
+          path: entry.path,
+          reason,
+          ...(reason === "unreadable" || reason === "symlink-escape"
+            ? {}
+            : { pattern: "*.js" }),
+          policy_path: "pkg/.gitignore",
+        })),
+      }),
+    ).toThrow();
+  });
+
+  it("orders distinct policy sources while rejecting duplicate provenance", () => {
+    const root = inputWithPolicy(".gitignore").exclusions[0]!;
+    const nested = inputWithPolicy("pkg/.gitignore").exclusions[0]!;
+    const input = {
+      ...inputWithPolicy(".gitignore"),
+      exclusions: [root, nested],
+    };
+    expect(historicalSourceExclusionKey(root)).not.toBe(
+      historicalSourceExclusionKey(nested),
+    );
+    expect(createHistoricalSourceGraph(input).exclusions).toEqual([
+      root,
+      nested,
+    ]);
+    for (const exclusions of [
+      [nested, root],
+      [root, root],
+    ])
+      expect(() =>
+        createHistoricalSourceGraph({ ...input, exclusions }),
+      ).toThrow(/sorted and unique/u);
+  });
+});
+
+it("preserves saved graphs and manifests that predate policy provenance", () => {
+  // Produced by commit 0f4ca95 before policy_path was added. Keep these fixed:
+  // regenerating them with the parser under test would hide compatibility loss.
+  const legacy = {
+    schema: "HistoricalSourceGraph",
+    authority: "historical-reference",
+    root_alias: "$REFERENCE_ROOT",
+    root_sha256:
+      "a76c11af4730a7580f66e9a41f033c2ce766d82c0b135c24dbaeb3c244e93fa9",
+    inventory_state: "partial",
+    entries: [],
+    relationships: [],
+    parse_failures: [],
+    exclusions: [
+      {
+        path: "dist",
+        entry_kind: "directory",
+        reason: "project-ignored",
+        pattern: "dist/",
+      },
+      {
+        path: "legacy/generated.js",
+        reason: "project-ignored",
+        pattern: "*.js",
+      },
+    ],
+    languages: [],
+    manifests: [],
+    vcs: null,
+    provenance: { importer: "rea", importer_version: "1", caller: "test" },
+    limitations: [],
+  };
+  const manifest = {
+    schema: "HistoricalSourceManifest",
+    authority: "historical-reference",
+    manifest_id:
+      "hsm_8c7c76320c1b4eb15ab0929e66239cc236b01d7c53d4df4f7646a16ae1471573",
+    graph_sha256:
+      "bfd517521789e4f85ab74d89e234206f9a5fb342d075c8a90755e36a9b6f240b",
+    root_sha256: legacy.root_sha256,
+    inventory_state: "partial",
+    entry_count: 0,
+    relationship_count: 0,
+  };
+  const parsed = parseHistoricalSourceGraph(legacy);
+  expect(parsed).toEqual(legacy);
+  expect(parsed.exclusions.every((entry) => !("policy_path" in entry))).toBe(
+    true,
+  );
+  expect(computeHistoricalSourceGraphSha256(parsed)).toBe(
+    manifest.graph_sha256,
+  );
+  expect(parseHistoricalSourceManifest(manifest)).toEqual(manifest);
+  expect(createHistoricalSourceManifest(parsed)).toEqual(manifest);
 });

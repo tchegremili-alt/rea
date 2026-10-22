@@ -228,61 +228,63 @@ async function runInlineWorkflowScenarios(
 
   await runUnicodeSourceMapComparison(harness);
 
-  const referenceWithExclusion = createHistoricalSourceGraph({
-    ...SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE.reference,
-    root_sha256: undefined,
-    inventory_state: "partial",
-    exclusions: [
-      {
-        path: "vendor/removed.ts",
-        reason: "project-ignored",
-        pattern: "vendor/",
-      },
-    ],
-  });
-  const argumentsWithExclusion = {
-    ...SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE,
-    reference: referenceWithExclusion,
-  };
-  const advertised = (await harness.client.listTools()).tools.find(
-    ({ name }) => name === "compare_source_to_bundle",
-  );
-  if (advertised === undefined) throw new Error("Comparison tool is missing");
-  const ajv = new Ajv2020({ strict: false, validateFormats: false });
-  expect(ajv.validateSchema(advertised.inputSchema)).toBe(true);
-  const validate = ajv.compile(advertised.inputSchema);
-  expect(validate(argumentsWithExclusion)).toBe(true);
-  const missingPattern = {
-    ...argumentsWithExclusion,
-    reference: {
-      ...referenceWithExclusion,
-      exclusions: [{ path: "vendor/removed.ts", reason: "project-ignored" }],
-    },
-  };
-  expect(
-    ajv.validate(
+  for (const policyPath of [undefined, "vendor/.gitignore"]) {
+    const referenceWithExclusion = createHistoricalSourceGraph({
+      ...SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE.reference,
+      root_sha256: undefined,
+      inventory_state: "partial",
+      exclusions: [
+        {
+          path: "vendor/removed.ts",
+          reason: "project-ignored",
+          pattern: "*.ts",
+          ...(policyPath === undefined ? {} : { policy_path: policyPath }),
+        },
+      ],
+    });
+    const argumentsWithExclusion = {
+      ...SOURCE_TO_BUNDLE_COMPARISON_EXAMPLE,
+      reference: referenceWithExclusion,
+    };
+    const advertised = (await harness.client.listTools()).tools.find(
+      ({ name }) => name === "compare_source_to_bundle",
+    );
+    if (advertised === undefined) throw new Error("Comparison tool is missing");
+    const ajv = new Ajv2020({ strict: false, validateFormats: false });
+    expect(ajv.validateSchema(advertised.inputSchema)).toBe(true);
+    const validate = ajv.compile(advertised.inputSchema);
+    const validateFullInput = ajv.compile(
       advertisedInputJsonSchema(toolContract("compare_source_to_bundle")),
-      missingPattern,
-    ),
-  ).toBe(false);
-  const rejectedExclusion = await harness.client.callTool({
-    name: "compare_source_to_bundle",
-    arguments: missingPattern,
-  });
-  expect(rejectedExclusion.isError).toBe(true);
-  const sourceComparedWithExclusion = await harness.client.callTool({
-    name: "compare_source_to_bundle",
-    arguments: argumentsWithExclusion,
-  });
-  expect(sourceComparedWithExclusion.isError).not.toBe(true);
-  expect(sourceComparedWithExclusion.structuredContent).toMatchObject({
-    normalized_result: {
+    );
+    expect(validate(argumentsWithExclusion)).toBe(true);
+    expect(validateFullInput(argumentsWithExclusion)).toBe(true);
+    const missingPattern = {
+      ...argumentsWithExclusion,
       reference: {
-        root_sha256: referenceWithExclusion.root_sha256,
-        inventory_state: "partial",
+        ...referenceWithExclusion,
+        exclusions: [{ path: "vendor/removed.ts", reason: "project-ignored" }],
       },
-    },
-  });
+    };
+    expect(validateFullInput(missingPattern)).toBe(false);
+    const rejectedExclusion = await harness.client.callTool({
+      name: "compare_source_to_bundle",
+      arguments: missingPattern,
+    });
+    expect(rejectedExclusion.isError).toBe(true);
+    const sourceComparedWithExclusion = await harness.client.callTool({
+      name: "compare_source_to_bundle",
+      arguments: argumentsWithExclusion,
+    });
+    expect(sourceComparedWithExclusion.isError).not.toBe(true);
+    expect(sourceComparedWithExclusion.structuredContent).toMatchObject({
+      normalized_result: {
+        reference: {
+          root_sha256: referenceWithExclusion.root_sha256,
+          inventory_state: "partial",
+        },
+      },
+    });
+  }
   expect(harness.session.exportEvidenceBundle().records.length).toBeGreaterThan(
     2,
   );

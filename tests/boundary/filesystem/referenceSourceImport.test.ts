@@ -385,6 +385,7 @@ describe("reference source symlink import", () => {
         entry_kind: "directory",
         reason,
         pattern,
+        ...(reason === "project-ignored" ? { policy_path: ".gitignore" } : {}),
       });
       expect(result.value.entries).toEqual(
         expect.arrayContaining([
@@ -889,6 +890,7 @@ describe.skipIf(process.platform === "win32")(
               entry_kind: "file",
               reason: "project-ignored",
               pattern: "project.tmp",
+              policy_path: ".gitignore",
             },
             {
               path: "project.log",
@@ -919,12 +921,14 @@ describe.skipIf(process.platform === "win32")(
               entry_kind: "directory",
               reason: "project-ignored",
               pattern: "empty-ignored/",
+              policy_path: ".gitignore",
             },
             {
               path: "project-parent",
               entry_kind: "directory",
               reason: "project-ignored",
               pattern: "project-parent/",
+              policy_path: ".gitignore",
             },
             {
               path: "caller-parent",
