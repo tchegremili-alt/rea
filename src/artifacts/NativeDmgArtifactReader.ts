@@ -19,6 +19,7 @@ import {
 } from "../filesystem/RegularFile.js";
 import { OwnedFileHandle } from "../filesystem/OwnedFileHandle.js";
 import {
+  ExecFileOutputCancelledError,
   execFileOutput,
   execFileOutputFailure,
 } from "../process/ExecFileOutput.js";
@@ -35,6 +36,9 @@ const VERIFY_SETTLE_DELAYS_MS = [250, 500] as const;
 const DETACH_SETTLE_DELAYS_MS = [250, 500, 1000] as const;
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
+/** The command owner wraps the caller reason; retain that exact reason as the cancellation cause. */
+const cancellationCause = (cause: unknown): unknown =>
+  cause instanceof ExecFileOutputCancelledError ? cause.cause : cause;
 /** Narrow host seam for tested, shell-free hdiutil lifecycle operations. */
 export interface NativeDmgHost {
   run(
@@ -113,7 +117,7 @@ const createSystemHost = (
           { reason: "cancelled" },
           "DMG operation cancelled",
           output?.stdout ?? "",
-          { cause },
+          { cause: cancellationCause(cause) },
         );
       const exitCode =
         typeof output?.code === "number" ? output.code : processExitCode(cause);
@@ -673,7 +677,7 @@ const runChecked = async (
         { reason: "cancelled" },
         "DMG operation cancelled",
         execFileOutputFailure(cause)?.stdout ?? "",
-        { cause },
+        { cause: cancellationCause(cause) },
       );
     const output = execFileOutputFailure(cause);
     throw new NativeDmgCommandFailure(
