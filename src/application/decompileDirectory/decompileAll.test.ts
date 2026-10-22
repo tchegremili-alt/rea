@@ -1285,3 +1285,126 @@ describe("decompile_all late cancellation", () => {
     expect(result).toEqual(err(failure));
   });
 });
+
+describe("decompile_all cancelled publish loop", () => {
+  const directory = useOutputDirectory();
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const stopReason = new Error("caller stopped");
+
+  /** A port that aborts the caller's signal once the first function is decompiled. */
+  const abortAfterFirst = (controller: AbortController) => {
+    const { port } = harness();
+    const stopping: AnalysisOperationPort = {
+      execute: async (operation, parameters, execution) => {
+        const result = await port.execute(operation, parameters, execution);
+        if (operation === "procedure_pseudo_code") controller.abort(stopReason);
+        return result;
+      },
+    };
+    return new EnhancedTools(stopping);
+  };
+
+  it("keeps an index failure primary when cancellation stops the publish loop", async () => {
+    const controller = new AbortController();
+    const failure = new AnalysisOutputError("decompile_all", "index failed");
+    vi.spyOn(DecompileExport.prototype, "writeIndex").mockResolvedValue(
+      err(failure),
+    );
+    const result = await run(
+      abortAfterFirst(controller),
+      directory(),
+      {},
+      controller.signal,
+    );
+    expect(result).toEqual(err(failure));
+  });
+
+  it("keeps a journal close failure primary when cancellation stops the publish loop", async () => {
+    const controller = new AbortController();
+    const failure = new AnalysisOutputError("decompile_all", "close failed");
+    const close = DecompileExport.prototype.close;
+    vi.spyOn(DecompileExport.prototype, "close").mockImplementation(
+      async function (this: DecompileExport) {
+        await close.call(this);
+        return err(failure);
+      },
+    );
+    const result = await run(
+      abortAfterFirst(controller),
+      directory(),
+      {},
+      controller.signal,
+    );
+    expect(result).toEqual(err(failure));
+  });
+
+  it("reports the caller's reason when cancellation stops the publish loop and finalization succeeds", async () => {
+    const controller = new AbortController();
+    const result = await run(
+      abortAfterFirst(controller),
+      directory(),
+      {},
+      controller.signal,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(result.error.cause).toBe(stopReason);
+  });
+
+  it("reports the caller's reason when procedure_info returns its own cancellation as the caller aborts", async () => {
+    const controller = new AbortController();
+    const { port } = harness();
+    const cancelling: AnalysisOperationPort = {
+      execute: (operation, parameters, execution) => {
+        if (operation !== "procedure_info")
+          return port.execute(operation, parameters, execution);
+        controller.abort(stopReason);
+        return Promise.resolve(
+          err(
+            new AnalysisCancelledError("procedure_info", {
+              cause: new Error("provider session stopped"),
+            }),
+          ),
+        );
+      },
+    };
+    const result = await run(
+      new EnhancedTools(cancelling),
+      directory(),
+      {},
+      controller.signal,
+    );
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error).toBeInstanceOf(AnalysisCancelledError);
+    expect(result.error.cause).toBe(stopReason);
+  });
+
+  it("keeps a provider's own cancellation primary when the caller did not abort", async () => {
+    const { port } = harness();
+    const providerCancelled = new AnalysisCancelledError(
+      "procedure_pseudo_code",
+      { cause: new Error("provider session stopped") },
+    );
+    const cancelling: AnalysisOperationPort = {
+      execute: (operation, parameters, execution) =>
+        operation === "procedure_pseudo_code"
+          ? Promise.resolve(err(providerCancelled))
+          : port.execute(operation, parameters, execution),
+    };
+    vi.spyOn(DecompileExport.prototype, "writeIndex").mockResolvedValue(
+      err(new AnalysisOutputError("decompile_all", "index failed")),
+    );
+    const result = await run(
+      new EnhancedTools(cancelling),
+      directory(),
+      {},
+      new AbortController().signal,
+    );
+    expect(result).toEqual(err(providerCancelled));
+  });
+});

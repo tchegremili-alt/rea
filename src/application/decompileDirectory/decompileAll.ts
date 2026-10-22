@@ -151,12 +151,20 @@ export const decompileAll = async (
     closed = await session.close();
   }
   // A publish, index or close failure stays primary: the journal or index
-  // may be incomplete and the caller needs that reason.
-  if (!published.ok) return published;
+  // may be incomplete and the caller needs that reason. Cancellation only
+  // replaces success, so an index or close failure after the caller's abort
+  // stopped the publish loop is still reported. A provider's own
+  // cancellation, without a caller abort, is a publish failure like any other.
+  const callerStoppedPublish =
+    !published.ok &&
+    published.error instanceof AnalysisCancelledError &&
+    isAborted(signal);
+  if (!published.ok && !callerStoppedPublish) return published;
   if (!indexed.ok) return indexed;
   if (!closed.ok) return closed;
   // Finalization succeeded, so committed files and the index are usable on
-  // resume, but a caller abort that arrived meanwhile is not a success.
+  // resume, but a caller abort that stopped the loop or arrived meanwhile is
+  // not a success. Report it with the caller's own reason.
   if (isAborted(signal)) return err(cancelled(signal));
   const manifest = decompileDirectoryManifestSchema.safeParse(
     manifestOf({
