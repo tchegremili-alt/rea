@@ -30,6 +30,15 @@ const sha = (bytes: Buffer): string =>
   createHash("sha256").update(bytes).digest("hex");
 const hex = (value: number): string => `0x${value.toString(16)}`;
 
+/** The digest snapshot the Ghidra client streams for these exact bytes. */
+const snapshotOf = (bytes: Buffer, target: DolTarget) => ({
+  sha256: sha(bytes),
+  bytes: bytes.length,
+  sectionSha256: target.dol.sections.map((section) =>
+    sha(bytes.subarray(section.fileOffset, section.fileOffset + section.size)),
+  ),
+});
+
 // Data at 0x80010000 (16 bytes) with BSS 0x8000fff8..0x80010018: the BSS
 // overlaps the data, so only the two 8-byte edges are uninitialized gaps.
 const DATA_ADDRESS = 0x8001_0000;
@@ -128,7 +137,7 @@ describe("GameCube DOL load-image attestation", () => {
     expect(target.dol.bssOverlaps).toEqual([0]);
 
     const result = attestGhidraDolLoadImage(
-      bytes,
+      snapshotOf(bytes, target),
       target,
       observationsFor(bytes, target.dol),
       undefined,
@@ -167,7 +176,7 @@ describe("GameCube DOL load-image attestation", () => {
     dataMapping.sha256 = "0".repeat(64);
 
     const result = attestGhidraDolLoadImage(
-      bytes,
+      snapshotOf(bytes, target),
       target,
       observations,
       undefined,
@@ -208,7 +217,7 @@ describe("GameCube DOL load-image attestation", () => {
     });
 
     const result = attestGhidraDolLoadImage(
-      bytes,
+      snapshotOf(bytes, target),
       target,
       observations,
       undefined,
@@ -225,7 +234,7 @@ describe("GameCube DOL load-image attestation", () => {
     const bytes = overlappingDol();
     const target = await dolTarget(bytes);
     const result = attestGhidraDolLoadImage(
-      bytes,
+      snapshotOf(bytes, target),
       target,
       observationsFor(bytes, target.dol, {
         id: "PowerPC:BE:32:Gekko_Broadway",
@@ -251,26 +260,33 @@ describe("GameCube DOL load-image attestation", () => {
       cspec: "default",
     });
     expect(
-      attestGhidraDolLoadImage(bytes, target, broadway, override),
+      attestGhidraDolLoadImage(
+        snapshotOf(bytes, target),
+        target,
+        broadway,
+        override,
+      ),
     ).toMatchObject({ ok: true, value: { status: "verified" } });
 
     // Same override, but Ghidra imported with the stock language instead.
     expect(
       attestGhidraDolLoadImage(
-        bytes,
+        snapshotOf(bytes, target),
         target,
         observationsFor(bytes, target.dol),
         override,
       ),
     ).toMatchObject({ ok: true, value: { status: "mismatch" } });
   });
+});
 
+describe("GameCube DOL snapshot digest", () => {
   it("refuses bytes that do not match the admitted target digest", async () => {
     const bytes = overlappingDol();
     const target = await dolTarget(bytes);
     expect(
       attestGhidraDolLoadImage(
-        Buffer.concat([bytes, Buffer.from([0])]),
+        snapshotOf(Buffer.concat([bytes, Buffer.from([0])]), target),
         target,
         observationsFor(bytes, target.dol),
         undefined,

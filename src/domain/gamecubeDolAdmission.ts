@@ -24,10 +24,16 @@ export interface GamecubeDolAdmissionRejection {
  * must equal the header entry; any other value is a selection conflict.
  */
 export const admitGamecubeDol = (input: {
+  /** Leading header bytes; the whole file is never required. */
   readonly bytes: Uint8Array;
+  /** Whole-file length; defaults to `bytes.length` when the file is fully supplied. */
+  readonly fileSize?: number;
   readonly entryPoint?: unknown;
 }): Result<GamecubeDolAdmission, GamecubeDolAdmissionRejection> => {
-  const parsed = parseDolHeader(input.bytes);
+  const parsed = parseDolHeader(
+    input.bytes,
+    input.fileSize ?? input.bytes.length,
+  );
   if (!parsed.ok)
     return err({
       reason: `gamecube-dol header rejected: ${parsed.error}`,

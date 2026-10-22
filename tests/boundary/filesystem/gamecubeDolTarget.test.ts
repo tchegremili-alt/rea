@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { truncate, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -76,6 +76,29 @@ describe("gamecube-dol admission", () => {
         error: {
           constraint: "file_format_rejected",
           message: expect.stringContaining("DOL has no used text section"),
+        },
+      });
+  });
+
+  it("refuses a large selected file with an invalid header after reading only the header", async () => {
+    // Sparse: the 2 GiB length is a metadata extension, so no real disk is used.
+    // A whole-file read would allocate the full length before the header check.
+    const directory = await createTestTempDirectory("rea-dol-sparse-");
+    const path = join(directory, "huge.dol");
+    await writeFile(path, Buffer.alloc(0x100));
+    await truncate(path, 2 * 1024 ** 3);
+    const target = await parseBinaryTarget("huge.dol", {
+      cwd: directory,
+      formatHint: "gamecube-dol",
+    });
+    expect(target.ok).toBe(false);
+    if (!target.ok)
+      expect(target).toMatchObject({
+        error: {
+          constraint: "file_format_rejected",
+          message: expect.stringContaining(
+            "gamecube-dol header rejected: DOL has no used text section",
+          ),
         },
       });
   });

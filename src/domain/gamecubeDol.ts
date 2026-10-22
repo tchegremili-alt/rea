@@ -72,13 +72,22 @@ const rangesOverlap = (
   sizeB: number,
 ): boolean => startA < startB + sizeB && startB < startA + sizeA;
 
-/** Parse and validate the 256-byte DOL header; no section contents are read. */
+/**
+ * Parse and validate the 256-byte DOL header; no section contents are read.
+ * `bytes` may be only the leading header bytes; `fileSize` is the whole file
+ * length used for section file-range bounds (defaults to `bytes.length`).
+ */
 export const parseDolHeader = (
   bytes: Uint8Array,
+  fileSize: number = bytes.length,
 ): Result<DolHeader, string> => {
+  if (fileSize < DOL_HEADER_SIZE)
+    return err(
+      `DOL header is truncated: needs ${DOL_HEADER_SIZE} bytes; the file has ${fileSize}`,
+    );
   if (bytes.length < DOL_HEADER_SIZE)
     return err(
-      `DOL header is truncated: needs ${DOL_HEADER_SIZE} bytes; the file has ${bytes.length}`,
+      `DOL header bytes are incomplete: needs ${DOL_HEADER_SIZE} bytes; ${bytes.length} were supplied`,
     );
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const slots = [
@@ -105,9 +114,9 @@ export const parseDolHeader = (
       return err(
         `${name}: file offset ${hex(slot.fileOffset)} overlaps the ${DOL_HEADER_SIZE}-byte DOL header`,
       );
-    if (fileEnd > bytes.length)
+    if (fileEnd > fileSize)
       return err(
-        `${name}: file range ${hex(slot.fileOffset)}..${hex(fileEnd)} exceeds the ${bytes.length}-byte file`,
+        `${name}: file range ${hex(slot.fileOffset)}..${hex(fileEnd)} exceeds the ${fileSize}-byte file`,
       );
     if (slot.address < DOL_MEMORY_START)
       return err(

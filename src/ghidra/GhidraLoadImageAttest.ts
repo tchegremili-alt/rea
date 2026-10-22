@@ -27,7 +27,10 @@ type NativeLoadImageAttestationInput = {
   readonly client: Partial<
     Pick<
       GhidraClient,
-      "hashTargetSnapshot" | "readTargetSnapshot" | "attestDosTargetSnapshot"
+      | "hashTargetSnapshot"
+      | "hashTargetSnapshotRanges"
+      | "readTargetSnapshot"
+      | "attestDosTargetSnapshot"
     >
   >;
   readonly mapSessionError: (failure: GhidraSessionError) => AnalysisError;
@@ -145,24 +148,27 @@ const compareLoadImage = async (
       }),
     );
   if (target.format === "gamecube-dol") {
-    if (client.readTargetSnapshot === undefined)
+    if (client.hashTargetSnapshotRanges === undefined)
       return err(
         comparisonFailure(
           input,
-          "The Ghidra client does not expose its immutable target snapshot for independent DOL load-image verification.",
+          "The Ghidra client does not expose its immutable target snapshot ranges for independent DOL load-image verification.",
         ),
       );
-    const snapshot = await client.readTargetSnapshot(undefined, signal);
+    const snapshot = await client.hashTargetSnapshotRanges(
+      target.dol.sections.map((section) => ({
+        start: section.fileOffset,
+        end: section.fileOffset + section.size,
+      })),
+      signal,
+    );
     if (!snapshot.ok) return err(sourceFailure(snapshot.error));
-    if (snapshot.value.kind !== "captured")
-      return err(
-        comparisonFailure(
-          input,
-          "The uncapped DOL load-image snapshot was unexpectedly not captured.",
-        ),
-      );
     const attested = attestGhidraDolLoadImage(
-      snapshot.value.bytes,
+      {
+        sha256: snapshot.value.sha256,
+        bytes: snapshot.value.bytes,
+        sectionSha256: snapshot.value.rangeSha256,
+      },
       target,
       observations,
       input.languageOverride,

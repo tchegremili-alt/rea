@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { GhidraLanguageOverride } from "../config/ghidraLanguageOverride.js";
 import type { BinaryTarget } from "../domain/binaryTargetTypes.js";
 import type { DolHeader } from "../domain/gamecubeDol.js";
@@ -15,8 +14,15 @@ import { ghidraDolLanguage } from "./GhidraDolProfile.js";
 type DolTarget = Extract<BinaryTarget, { format: "gamecube-dol" }>;
 type Range = { readonly start: number; readonly end: number };
 
-const sha256 = (bytes: Buffer): string =>
-  createHash("sha256").update(bytes).digest("hex");
+/**
+ * Digests of the immutable DOL snapshot, streamed by the Ghidra client: whole
+ * file identity plus one digest per header section, in `header.sections` order.
+ */
+export interface DolSnapshotDigests {
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly sectionSha256: readonly string[];
+}
 const hex = (value: number): string => `0x${value.toString(16)}`;
 const byStart = <T extends { readonly start: string }>(left: T, right: T) =>
   Number(BigInt(left.start) - BigInt(right.start));
@@ -47,14 +53,16 @@ const uncoveredBss = (
  * header entry is an external entry point.
  */
 export const attestGhidraDolLoadImage = (
-  bytes: Buffer,
+  snapshot: DolSnapshotDigests,
   target: DolTarget,
   observations: NativeLoadImageObservation,
   languageOverride: GhidraLanguageOverride | undefined,
 ): Result<NativeLoadImage, string> => {
-  if (sha256(bytes) !== target.sha256)
+  if (snapshot.sha256 !== target.sha256)
     return err("Ghidra DOL snapshot digest does not match the admitted target");
   const header: DolHeader = target.dol;
+  if (snapshot.sectionSha256.length !== header.sections.length)
+    return err("Ghidra DOL snapshot section digests do not match the header");
   const language = ghidraDolLanguage(languageOverride);
   const checks: NativeLoadImageCheck[] = [];
   const check = (
@@ -100,14 +108,13 @@ export const attestGhidraDolLoadImage = (
   });
 
   const expectedFileMappings = header.sections
-    .map((section) => {
-      const fileEnd = section.fileOffset + section.size;
+    .map((section, index) => {
       return fileFacts({
         start: hex(section.address),
         end: hex(section.address + section.size - 1),
         length: section.size,
         file_offset: section.fileOffset,
-        sha256: sha256(bytes.subarray(section.fileOffset, fileEnd)),
+        sha256: snapshot.sectionSha256[index] ?? null,
         source_file_index: 0,
         initialized: true,
         loaded: true,
@@ -175,7 +182,7 @@ export const attestGhidraDolLoadImage = (
     );
   check("image_base", "0x0", observations.image_base);
   check("source_file_count", 1, observations.source_files.length);
-  check("source_file_size", bytes.length, source?.size ?? null);
+  check("source_file_size", snapshot.bytes, source?.size ?? null);
   check("original_file_sha256", target.sha256, source?.original_sha256 ?? null);
   check("modified_file_sha256", target.sha256, source?.modified_sha256 ?? null);
   check("file_backed_mappings", expectedFileMappings, observedFileMappings);
@@ -203,7 +210,7 @@ export const attestGhidraDolLoadImage = (
       architecture: "powerpc",
       language_id: observations.language_id,
       compiler_spec_id: observations.compiler_spec_id,
-      file_bytes: bytes.length,
+      file_bytes: snapshot.bytes,
       entry: { address: hex(header.entryPoint) },
       sections: header.sections.map((section) => ({
         kind: section.kind,

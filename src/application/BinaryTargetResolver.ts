@@ -32,6 +32,7 @@ import {
   rawBinarySelectionError,
 } from "../domain/rawBinary.js";
 import { admitGamecubeDol } from "../domain/gamecubeDolAdmission.js";
+import { DOL_HEADER_SIZE } from "../domain/gamecubeDol.js";
 import type { BinaryArchitecture } from "../domain/binaryTargetTypes.js";
 import { observeMzWindowsHeader } from "../domain/dosMz.js";
 import {
@@ -172,14 +173,18 @@ export const parseBinaryTarget = async (
               { constraint: "load_selection_rejected" },
             ),
           );
-        // The header bounds check needs the whole file length, so read every byte once.
-        const fileBytes = await readWholeFile(
+        // Only the fixed header is parsed; section bounds use the file size from metadata.
+        const headerBytes = await readLeadingBytes(
           handle,
-          metadata.size,
+          Math.min(metadata.size, DOL_HEADER_SIZE),
           path,
           signal,
         );
-        const admitted = admitGamecubeDol({ bytes: fileBytes, entryPoint });
+        const admitted = admitGamecubeDol({
+          bytes: headerBytes,
+          fileSize: metadata.size,
+          entryPoint,
+        });
         if (!admitted.ok)
           return err(
             new BinaryTargetError(path, admitted.error.reason, {
@@ -532,7 +537,7 @@ const readHandleRange = async (
 };
 
 /** Read exactly `size` bytes by offset; a short read means the file changed or ended early. */
-const readWholeFile = async (
+const readLeadingBytes = async (
   handle: FileHandle,
   size: number,
   path: string,

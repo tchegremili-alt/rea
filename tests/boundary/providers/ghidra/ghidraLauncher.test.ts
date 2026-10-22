@@ -715,47 +715,53 @@ describe("Ghidra Windows launcher runtime", () => {
 });
 
 describe("Ghidra GameCube DOL section file", () => {
-  it("writes the canonical section table next to session.json before spawn", async () => {
-    const parent = await createTestTempDirectory("rea-dol-section-");
-    const runtime = await createGhidraTestRuntime(parent);
-    runtimes.push(runtime);
-    const sectionFile =
-      "kind index fileOffset address size\ntext 0 0x100 0x80003100 0x20\n";
-    const spawnProcess = vi.fn(async () => {
-      throw new Error("fixture stops before process creation");
-    });
-    const javaHome = "/opt/fixture-jdk";
-    const launcher = new GhidraHeadlessLauncher({
-      environment: process.env,
-      platform: "darwin",
-      configurationDirectoryName: "ghidra_12.1.4_PUBLIC",
-      analyzeHeadlessPath: fixturePath,
-      javaHome,
-      bridgeScriptPath: join(parent, "ReaGhidraBridge.java"),
-      javaLaunch: async () => ({
-        command: join(javaHome, "bin", "java"),
-        arguments: [],
-        environment: {},
-      }),
-      spawnProcess,
-      gamecubeDol: {
-        languageId: "PowerPC:BE:32:default",
-        sectionFile,
-      },
-    });
-    await launcher.launch({
-      runtimeRoot: runtime.path,
-      transport: "unix-socket",
-      endpointPath: join(runtime.path, "bridge.sock"),
-      token: "token-for-section-test",
-      runId: "d6fcbb66-e829-4ff6-a535-0035aec63139",
-      targetPath: "/tmp/fixture.dol",
-      targetSha256: "c".repeat(64),
-      providerVersion: "12.1.4",
-      profileDigest: "a".repeat(64),
-    });
-    expect(spawnProcess).toHaveBeenCalledOnce();
-    const sectionPath = join(runtime.path, "gamecube-dol-sections.txt");
-    expect(await readFile(sectionPath, "utf8")).toBe(sectionFile);
-  });
+  // The fixture forces the POSIX launch path (platform "darwin": posix paths,
+  // 0600 files, direct JVM). Windows CI returns a launch error before spawn,
+  // so this runs only where that path is the real host path.
+  it.skipIf(process.platform === "win32")(
+    "writes the canonical section table next to session.json before spawn",
+    async () => {
+      const parent = await createTestTempDirectory("rea-dol-section-");
+      const runtime = await createGhidraTestRuntime(parent);
+      runtimes.push(runtime);
+      const sectionFile =
+        "kind index fileOffset address size\ntext 0 0x100 0x80003100 0x20\n";
+      const spawnProcess = vi.fn(async () => {
+        throw new Error("fixture stops before process creation");
+      });
+      const javaHome = "/opt/fixture-jdk";
+      const launcher = new GhidraHeadlessLauncher({
+        environment: process.env,
+        platform: "darwin",
+        configurationDirectoryName: "ghidra_12.1.4_PUBLIC",
+        analyzeHeadlessPath: fixturePath,
+        javaHome,
+        bridgeScriptPath: join(parent, "ReaGhidraBridge.java"),
+        javaLaunch: async () => ({
+          command: join(javaHome, "bin", "java"),
+          arguments: [],
+          environment: {},
+        }),
+        spawnProcess,
+        gamecubeDol: {
+          languageId: "PowerPC:BE:32:default",
+          sectionFile,
+        },
+      });
+      await launcher.launch({
+        runtimeRoot: runtime.path,
+        transport: "unix-socket",
+        endpointPath: join(runtime.path, "bridge.sock"),
+        token: "token-for-section-test",
+        runId: "d6fcbb66-e829-4ff6-a535-0035aec63139",
+        targetPath: "/tmp/fixture.dol",
+        targetSha256: "c".repeat(64),
+        providerVersion: "12.1.4",
+        profileDigest: "a".repeat(64),
+      });
+      expect(spawnProcess).toHaveBeenCalledOnce();
+      const sectionPath = join(runtime.path, "gamecube-dol-sections.txt");
+      expect(await readFile(sectionPath, "utf8")).toBe(sectionFile);
+    },
+  );
 });
